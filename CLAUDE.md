@@ -51,7 +51,6 @@ This project uses strict TypeScript settings:
 - `noUnusedParameters: true` - Error on unused function parameters
 - `noImplicitReturns: true` - Error if not all code paths return a value
 - `noUncheckedIndexedAccess: true` - Add undefined to indexed access results
-- `exactOptionalPropertyTypes: true` - Stricter optional property handling
 
 ## ESLint Configuration
 
@@ -72,10 +71,25 @@ mcp-proxy/
 │   ├── registry.ts    # Backend server connection manager
 │   ├── client.ts      # HTTP MCP client for backend connections
 │   └── types.ts       # Shared types
+├── ad-hoc-tests/      # Throwaway test scripts (gitignored)
 ├── package.json
 ├── tsconfig.json
 ├── eslint.config.js
 └── CLAUDE.md
+```
+
+## Ad-hoc Test Scripts
+
+Place throwaway test scripts in the `ad-hoc-tests/` directory. This folder is gitignored.
+
+**Naming convention**: Prefix files with the current date in `YYYY-MM-DD` format.
+
+```bash
+# Example
+ad-hoc-tests/2025-12-29-test-client.ts
+
+# Run with
+bun run ad-hoc-tests/2025-12-29-test-client.ts
 ```
 
 ## Running the Server

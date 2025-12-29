@@ -68,6 +68,7 @@ export class MCPHttpClient {
   private status: BackendServerStatus = "disconnected";
   private errorMessage: string | undefined;
   private capabilities: BackendServerInfo["capabilities"] | undefined;
+  private isClosing = false;
 
   constructor(options: MCPHttpClientOptions) {
     this.name = options.name;
@@ -150,10 +151,18 @@ export class MCPHttpClient {
 
       // Set up transport event handlers
       this.transport.onclose = (): void => {
-        this.setStatus("disconnected");
+        // Only set disconnected if not already closing (avoid duplicate status)
+        if (!this.isClosing) {
+          this.setStatus("disconnected");
+        }
       };
 
       this.transport.onerror = (error): void => {
+        // Ignore AbortError during/after intentional disconnect
+        const isAbortError = error.name === "AbortError" || error.message.includes("AbortError");
+        if (isAbortError && (this.isClosing || this.status === "disconnected")) {
+          return;
+        }
         this.setStatus("error", error.message);
       };
 
@@ -181,6 +190,8 @@ export class MCPHttpClient {
    * Disconnect from the backend MCP server
    */
   public async disconnect(): Promise<void> {
+    this.isClosing = true;
+
     if (this.transport) {
       try {
         await this.transport.close();
@@ -191,6 +202,7 @@ export class MCPHttpClient {
 
     this.client = null;
     this.transport = null;
+    this.isClosing = false;
     this.setStatus("disconnected");
   }
 
