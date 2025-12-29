@@ -3,15 +3,11 @@
   "version": "0.1.0",
   "description": "MCP proxy server with static tools for managing dynamic backend MCP servers",
   "type": "module",
-  "main": "dist/server.js",
-  "exports": {
-    ".": {
-      "types": "./dist/server.d.ts",
-      "import": "./dist/server.js"
-    }
+  "bin": {
+    "mcp-proxy": "./dist/mcp-proxy.js"
   },
   "files": [
-    "dist",
+    "dist/mcp-proxy.js",
     "README.md",
     "LICENSE"
   ],
@@ -30,16 +26,18 @@
     "proxy",
     "llm",
     "tools",
-    "ai"
+    "ai",
+    "cli"
   ],
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/server.js",
+    "build": "bun build src/server.ts --outfile=dist/mcp-proxy.js --target=node --minify",
+    "start": "node dist/mcp-proxy.js",
     "dev": "bun run src/server.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun run lint"
+    "check": "bun run typecheck && bun run lint",
+    "prepublishOnly": "bun run check && bun run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
