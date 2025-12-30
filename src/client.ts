@@ -16,16 +16,25 @@ import type {
   GetPromptResult,
   ReadResourceResult,
   JSONRPCNotification,
+  CreateMessageResult,
+  ElicitResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   ToolListChangedNotificationSchema,
   ResourceListChangedNotificationSchema,
+  ResourceUpdatedNotificationSchema,
   PromptListChangedNotificationSchema,
+  LoggingMessageNotificationSchema,
+  CreateMessageRequestSchema,
+  ElicitRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type {
   BackendServerStatus,
   BackendServerInfo,
   BufferedNotification,
+  BufferedLog,
+  PendingSamplingRequest,
+  PendingElicitationRequest,
 } from "./types.js";
 
 /**
@@ -40,6 +49,12 @@ export interface MCPHttpClientOptions {
   onStatusChange?: (status: BackendServerStatus, error?: string) => void;
   /** Callback when a notification is received from the server */
   onNotification?: (notification: BufferedNotification) => void;
+  /** Callback when a log message is received from the server */
+  onLog?: (log: BufferedLog) => void;
+  /** Callback when a sampling request is received from the server */
+  onSamplingRequest?: (request: PendingSamplingRequest) => void;
+  /** Callback when an elicitation request is received from the server */
+  onElicitationRequest?: (request: PendingElicitationRequest) => void;
 }
 
 /**
@@ -62,6 +77,13 @@ export class MCPHttpClient {
   private readonly onNotification:
     | ((notification: BufferedNotification) => void)
     | undefined;
+  private readonly onLog: ((log: BufferedLog) => void) | undefined;
+  private readonly onSamplingRequest:
+    | ((request: PendingSamplingRequest) => void)
+    | undefined;
+  private readonly onElicitationRequest:
+    | ((request: PendingElicitationRequest) => void)
+    | undefined;
 
   private client: Client | null = null;
   private transport: StreamableHTTPClientTransport | null = null;
@@ -75,6 +97,9 @@ export class MCPHttpClient {
     this.url = options.url;
     this.onStatusChange = options.onStatusChange;
     this.onNotification = options.onNotification;
+    this.onLog = options.onLog;
+    this.onSamplingRequest = options.onSamplingRequest;
+    this.onElicitationRequest = options.onElicitationRequest;
   }
 
   /**
@@ -133,7 +158,7 @@ export class MCPHttpClient {
       // Create the transport
       this.transport = new StreamableHTTPClientTransport(new URL(this.url));
 
-      // Create the client
+      // Create the client with capabilities for receiving server requests
       this.client = new Client(
         {
           name: "mcp-proxy",
@@ -141,7 +166,12 @@ export class MCPHttpClient {
         },
         {
           capabilities: {
-            // We want to receive notifications
+            // Advertise support for sampling (server can request LLM completions)
+            sampling: {},
+            // Advertise support for elicitation (server can request user input)
+            elicitation: {
+              form: {},
+            },
           },
         }
       );
@@ -303,7 +333,7 @@ export class MCPHttpClient {
   }
 
   /**
-   * Set up the notification handler for the client
+   * Set up notification and request handlers for the client
    */
   private setupNotificationHandler(): void {
     if (!this.client) return;
@@ -324,11 +354,79 @@ export class MCPHttpClient {
       }
     );
 
+    // Handle resources/updated (individual resource content changed)
+    this.client.setNotificationHandler(
+      ResourceUpdatedNotificationSchema,
+      (notification) => {
+        this.emitNotification("notifications/resources/updated", notification.params);
+      }
+    );
+
     // Handle prompts/list_changed
     this.client.setNotificationHandler(
       PromptListChangedNotificationSchema,
       () => {
         this.emitNotification("notifications/prompts/list_changed");
+      }
+    );
+
+    // Handle logging/message notifications
+    this.client.setNotificationHandler(
+      LoggingMessageNotificationSchema,
+      (notification) => {
+        if (this.onLog) {
+          this.onLog({
+            server: this.name,
+            timestamp: new Date(),
+            level: notification.params.level,
+            logger: notification.params.logger,
+            data: notification.params.data,
+          });
+        }
+      }
+    );
+
+    // Handle sampling/createMessage requests
+    // This is a SERVER -> CLIENT request where the server asks us to generate an LLM response
+    this.client.setRequestHandler(
+      CreateMessageRequestSchema,
+      (request): Promise<CreateMessageResult> => {
+        return new Promise((resolve, reject) => {
+          if (this.onSamplingRequest) {
+            this.onSamplingRequest({
+              id: crypto.randomUUID(),
+              server: this.name,
+              timestamp: new Date(),
+              params: request.params,
+              resolve,
+              reject,
+            });
+          } else {
+            reject(new Error("Sampling not supported: no handler registered"));
+          }
+        });
+      }
+    );
+
+    // Handle elicitation/create requests
+    // This is a SERVER -> CLIENT request where the server asks us for user input
+    this.client.setRequestHandler(
+      ElicitRequestSchema,
+      (request): Promise<ElicitResult> => {
+        return new Promise((resolve, reject) => {
+          if (this.onElicitationRequest) {
+            this.onElicitationRequest({
+              id: crypto.randomUUID(),
+              server: this.name,
+              timestamp: new Date(),
+              params: request.params,
+              resolve,
+              reject,
+            });
+          } else {
+            reject(new Error("Elicitation not supported: no handler registered"));
+          }
+        });
       }
     );
   }

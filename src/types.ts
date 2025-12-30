@@ -8,6 +8,11 @@ import type {
   Prompt,
   ResourceTemplate,
   JSONRPCNotification,
+  LoggingLevel,
+  CreateMessageRequestParams,
+  CreateMessageResult,
+  ElicitRequestParams,
+  ElicitResult,
 } from "@modelcontextprotocol/sdk/types.js";
 
 /**
@@ -113,4 +118,98 @@ export interface ToolExecutionResult {
     mimeType?: string;
     [key: string]: unknown;
   }[];
+}
+
+// =============================================================================
+// Logging Types
+// =============================================================================
+
+/**
+ * A buffered log message from a backend server
+ */
+export interface BufferedLog {
+  /** The backend server this log came from */
+  server: string;
+  /** Timestamp when the log was received */
+  timestamp: Date;
+  /** Log level */
+  level: LoggingLevel;
+  /** Logger name (optional) */
+  logger?: string;
+  /** Log data (can be any JSON-serializable type) */
+  data: unknown;
+}
+
+// =============================================================================
+// Sampling Types
+// =============================================================================
+
+/**
+ * A pending sampling request from a backend server awaiting response.
+ * The promise resolve/reject functions are used to complete the original request.
+ */
+export interface PendingSamplingRequest {
+  /** Unique ID for this request */
+  id: string;
+  /** The backend server this request came from */
+  server: string;
+  /** Timestamp when the request was received */
+  timestamp: Date;
+  /** The original request parameters */
+  params: CreateMessageRequestParams;
+  /** Promise resolver to complete the request */
+  resolve: (result: CreateMessageResult) => void;
+  /** Promise rejecter to fail the request */
+  reject: (error: Error) => void;
+}
+
+/**
+ * Simplified sampling request info for tool output (excludes internal resolver/rejecter)
+ */
+export interface SamplingRequestInfo {
+  /** Unique ID for this request */
+  id: string;
+  /** The backend server this request came from */
+  server: string;
+  /** Timestamp when the request was received */
+  timestamp: Date;
+  /** The request parameters */
+  params: CreateMessageRequestParams;
+}
+
+// =============================================================================
+// Elicitation Types
+// =============================================================================
+
+/**
+ * A pending elicitation request from a backend server awaiting response.
+ * The promise resolve/reject functions are used to complete the original request.
+ */
+export interface PendingElicitationRequest {
+  /** Unique ID for this request */
+  id: string;
+  /** The backend server this request came from */
+  server: string;
+  /** Timestamp when the request was received */
+  timestamp: Date;
+  /** The original request parameters */
+  params: ElicitRequestParams;
+  /** Promise resolver to complete the request */
+  resolve: (result: ElicitResult) => void;
+  /** Promise rejecter to fail the request */
+  reject: (error: Error) => void;
+}
+
+/**
+ * Simplified elicitation request info for tool output (excludes internal resolver/rejecter)
+ */
+export interface ElicitationRequestInfo {
+  /** Unique ID for this request */
+  id: string;
+  /** The backend server this request came from */
+  server: string;
+  /** Timestamp when the request was received */
+  timestamp: Date;
+  /** The request parameters */
+  params: ElicitRequestParams;
 }
