@@ -22,8 +22,11 @@ import { readFileSync } from "fs";
 
 import { SessionManager } from "./session/session-manager.js";
 import type { SessionState } from "./session/session-state.js";
+import { SSEEventStore } from "./session/sse-event-store.js";
 import type { ProxyConfig } from "./types.js";
 import { createConsoleLogger } from "./logging.js";
+import { RequestTracker } from "./request-tracker.js";
+import { generateWaterfallHTML, generateWaterfallJSON } from "./waterfall-ui.js";
 
 // =============================================================================
 // Types
@@ -140,7 +143,8 @@ function toolJson(data: unknown): ToolResponse {
 function registerTools(
   server: McpServer,
   sessionManager: SessionManager,
-  sessions: Map<string, string>
+  sessions: Map<string, string>,
+  requestTracker: RequestTracker
 ): void {
   // ---------------------------------------------------------------------------
   // Server Management Tools
@@ -200,6 +204,30 @@ function registerTools(
   );
 
   server.registerTool(
+    "reconnect_server",
+    {
+      description: "Force reconnection to a backend MCP server. Works on connected, disconnected, or reconnecting servers. Cancels any pending reconnection and immediately attempts a fresh connection.",
+      inputSchema: {
+        name: z.string().describe("Name of the server to reconnect"),
+      },
+    },
+    async ({ name }, extra): Promise<ToolResponse> => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      try {
+        await sessionManager.reconnectServer(session.sessionId, name);
+        return toolSuccess(`Reconnected to server '${name}'`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return toolError(`Failed to reconnect: ${message}`);
+      }
+    }
+  );
+
+  server.registerTool(
     "list_servers",
     {
       description: "List all configured backend MCP servers with their connection status for this session",
@@ -216,14 +244,32 @@ function registerTools(
         return toolSuccess("No servers configured");
       }
 
-      const formatted = servers.map((s) => ({
-        name: s.name,
-        url: s.url,
-        status: s.status,
-        connected: s.connected,
-        connectedAt: s.connectedAt?.toISOString(),
-        lastError: s.lastError,
-      }));
+      const formatted = servers.map((s) => {
+        const result: Record<string, unknown> = {
+          name: s.name,
+          url: s.url,
+          status: s.status,
+          connected: s.connected,
+          connectedAt: s.connectedAt?.toISOString(),
+          lastError: s.lastError,
+        };
+
+        // Add reconnection state if reconnecting
+        if (s.status === "reconnecting") {
+          result["reconnectAttempt"] = s.reconnectAttempt;
+          result["nextRetryMs"] = s.nextRetryMs;
+        }
+
+        // Add health status if connected
+        if (s.status === "connected") {
+          result["healthStatus"] = s.healthStatus;
+          if (s.consecutiveHealthFailures !== undefined && s.consecutiveHealthFailures > 0) {
+            result["consecutiveHealthFailures"] = s.consecutiveHealthFailures;
+          }
+        }
+
+        return result;
+      });
 
       return toolJson(formatted);
     }
@@ -311,9 +357,31 @@ function registerTools(
         return toolError("Session not found");
       }
 
+      // Check if server is reconnecting
+      const connection = session.getConnection(serverName);
+      if (connection?.status === "reconnecting") {
+        const reconnState = connection.client.getReconnectionState();
+        const details = reconnState
+          ? ` (attempt ${String(reconnState.attempt)}, next retry in ${String(reconnState.nextRetryMs)}ms)`
+          : "";
+        return toolError(`Server '${serverName}' is reconnecting${details}. Use reconnect_server to force immediate reconnection or await_activity to wait for reconnection.`);
+      }
+
+      // Track the request
+      const requestId = requestTracker.startRequest(
+        session.sessionId,
+        "backend_tool",
+        tool,
+        { server: serverName, args }
+      );
+
       try {
         const client = await sessionManager.getOrCreateConnection(session.sessionId, serverName);
         const result = await client.callTool(tool, args ?? {});
+
+        // Track completion
+        const summary = result.isError ? "error" : "ok";
+        requestTracker.completeRequest(requestId, summary);
 
         // Pass through the result content directly, preserving all content types
         return {
@@ -322,6 +390,7 @@ function registerTools(
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        requestTracker.failRequest(requestId, message);
         return toolError(`Failed to execute tool: ${message}`);
       }
     }
@@ -391,6 +460,65 @@ function registerTools(
   );
 
   server.registerTool(
+    "list_resource_templates",
+    {
+      description: "List resource templates available from backend servers. Templates define parameterized resources that can be read with specific arguments.",
+      inputSchema: {
+        server: z.string().optional().describe("Server name to filter by (omit for all servers)"),
+      },
+    },
+    async ({ server: serverName }, extra): Promise<ToolResponse> => {
+      const session = getSessionForTool(sessionManager, extra, sessions);
+      if (!session) {
+        return toolError("Session not found");
+      }
+
+      try {
+        const templates: {
+          server: string;
+          uriTemplate: string;
+          name: string;
+          description?: string;
+          mimeType?: string;
+        }[] = [];
+
+        const serversToQuery = serverName
+          ? [serverName]
+          : session.listConnectedServers();
+
+        for (const name of serversToQuery) {
+          const connection = session.getConnection(name);
+          if (connection?.status !== "connected") continue;
+
+          try {
+            const serverTemplates = await connection.client.listResourceTemplates();
+            for (const t of serverTemplates) {
+              templates.push({
+                server: name,
+                uriTemplate: t.uriTemplate,
+                name: t.name,
+                description: t.description,
+                mimeType: t.mimeType,
+              });
+            }
+          } catch {
+            // Skip servers that fail
+          }
+        }
+
+        if (templates.length === 0) {
+          return toolSuccess("No resource templates available");
+        }
+
+        return toolJson(templates);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return toolError(`Failed to list resource templates: ${message}`);
+      }
+    }
+  );
+
+  server.registerTool(
     "read_resource",
     {
       description: "Read a specific resource from a backend server",
@@ -404,6 +532,14 @@ function registerTools(
       if (!session) {
         return toolError("Session not found");
       }
+
+      // Track the request
+      const requestId = requestTracker.startRequest(
+        session.sessionId,
+        "backend_resource",
+        uri,
+        { server: serverName }
+      );
 
       try {
         const client = await sessionManager.getOrCreateConnection(session.sessionId, serverName);
@@ -419,9 +555,11 @@ function registerTools(
           return c;
         });
 
+        requestTracker.completeRequest(requestId, `${String(contents.length)} content(s)`);
         return toolJson({ contents });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        requestTracker.failRequest(requestId, message);
         return toolError(`Failed to read resource: ${message}`);
       }
     }
@@ -959,6 +1097,9 @@ function main(): void {
     }
   }
 
+  // Create request tracker for debugging/waterfall UI
+  const requestTracker = new RequestTracker({ logger });
+
   // Create the MCP server
   const mcpServer = new McpServer({
     name: "emceepee",
@@ -970,17 +1111,31 @@ function main(): void {
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
   // Register all tools
-  registerTools(mcpServer, sessionManager, transportToSession);
+  registerTools(mcpServer, sessionManager, transportToSession, requestTracker);
 
   // Create HTTP server
   const httpServer = createServer((req, res) => {
     const host = req.headers.host ?? "localhost";
     const url = new URL(req.url ?? "/", `http://${host}`);
 
-    // Only handle /mcp endpoint
+    // Serve waterfall UI
+    if (url.pathname === "/waterfall" || url.pathname === "/waterfall/") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(generateWaterfallHTML(requestTracker));
+      return;
+    }
+
+    // Serve waterfall JSON data
+    if (url.pathname === "/waterfall/json") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(generateWaterfallJSON(requestTracker), null, 2));
+      return;
+    }
+
+    // Only handle /mcp endpoint for MCP protocol
     if (url.pathname !== "/mcp") {
       res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Not found" }));
+      res.end(JSON.stringify({ error: "Not found. Available endpoints: /mcp, /waterfall, /waterfall/json" }));
       return;
     }
 
@@ -992,9 +1147,23 @@ function main(): void {
       let transport = transportSessionId ? transports.get(transportSessionId) : undefined;
 
       if (!transport) {
+        // Log when we're creating a new transport
+        if (transportSessionId) {
+          // Session ID provided but transport not found - this could indicate a bug
+          logger.warn("transport_not_found_for_session", {
+            transportSessionId,
+            transportCount: transports.size,
+            knownTransports: Array.from(transports.keys()),
+          });
+        }
+
         // Create new transport for this session
+        // Create per-transport event store for SSE resumability
+        const eventStore = new SSEEventStore({ logger });
+
         const newTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: (): string => crypto.randomUUID(),
+          eventStore, // Enable SSE resumability via Last-Event-ID
           onsessioninitialized: (newTransportSessionId): void => {
             transports.set(newTransportSessionId, newTransport);
 
@@ -1013,6 +1182,7 @@ function main(): void {
         // Connect to MCP server
         void mcpServer.connect(newTransport);
       } else {
+        logger.debug("using_existing_transport", { transportSessionId });
         // Touch the session on activity
         const ourSessionId = transportToSession.get(transportSessionId ?? "");
         if (ourSessionId) {
@@ -1037,7 +1207,41 @@ function main(): void {
         return;
       }
 
+      // Track SSE connection close for session cleanup
+      res.on("close", () => {
+        logger.info("sse_connection_closed", { transportSessionId });
+
+        // Clean up transport and session when SSE connection closes
+        const existingTransport = transports.get(transportSessionId);
+        if (existingTransport) {
+          void existingTransport.close();
+          transports.delete(transportSessionId);
+
+          const ourSessionId = transportToSession.get(transportSessionId);
+          if (ourSessionId) {
+            void sessionManager.destroySession(ourSessionId);
+            transportToSession.delete(transportSessionId);
+            logger.info("session_closed_via_sse", { transportSessionId, sessionId: ourSessionId });
+          }
+        }
+      });
+
+      // Check if this is a replay request (has Last-Event-ID header)
+      const isReplayRequest = req.headers["last-event-id"] !== undefined;
+
+      // Start handling the request (this sets up the SSE stream)
       void transport.handleRequest(req, res);
+
+      // After GET SSE stream is established, send a priming notification
+      // This gives the client an initial event ID for replay if connection drops
+      // Skip if this is already a replay request (client already has event IDs)
+      if (!isReplayRequest) {
+        // Small delay to ensure stream is fully established before sending
+        setTimeout(() => {
+          logger.debug("sending_sse_priming_notification", { transportSessionId });
+          mcpServer.sendToolListChanged();
+        }, 100);
+      }
     } else if (req.method === "DELETE") {
       // Session cleanup
       if (transportSessionId && transports.has(transportSessionId)) {
@@ -1085,8 +1289,9 @@ function main(): void {
   httpServer.listen(port, () => {
     logger.info("Server started", { url: `http://localhost:${String(port)}/mcp` });
     console.log(`MCP Proxy Server running at http://localhost:${String(port)}/mcp`);
+    console.log(`Waterfall UI available at http://localhost:${String(port)}/waterfall`);
     console.log("\nAvailable tools:");
-    console.log("  Server management: add_server, remove_server, list_servers");
+    console.log("  Server management: add_server, remove_server, reconnect_server, list_servers");
     console.log("  Tools: list_tools, execute_tool");
     console.log("  Resources: list_resources, read_resource");
     console.log("  Prompts: list_prompts, get_prompt");
