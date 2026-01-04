@@ -158,6 +158,10 @@ function loadConfig(path: string): ProxyConfig {
   return JSON.parse(content) as ProxyConfig;
 }
 
+function loadConfigFromJson(json: string): ProxyConfig {
+  return JSON.parse(json) as ProxyConfig;
+}
+
 // =============================================================================
 // Session Resolution Helper
 // =============================================================================
@@ -1100,8 +1104,28 @@ async function main(): Promise<void> {
     cleanupIntervalMs: 5 * 60 * 1000, // 5 minutes
   });
 
-  // Load initial servers from config if provided
-  if (configPath) {
+  // Load initial servers from config (env var JSON takes precedence over file path)
+  const configJson = process.env["EMCEEPEE_CONFIG"];
+
+  if (configJson) {
+    try {
+      const config = loadConfigFromJson(configJson);
+      logger.info("Loading servers from config", {
+        count: config.servers.length,
+        source: "EMCEEPEE_CONFIG env var",
+      });
+
+      for (const server of config.servers) {
+        logger.info("Adding server config", { name: server.name, url: server.url });
+        sessionManager.getServerConfigs().addConfig(server.name, server.url);
+      }
+    } catch (err) {
+      logger.error("Failed to load config from EMCEEPEE_CONFIG", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      process.exit(1);
+    }
+  } else if (configPath) {
     try {
       const config = loadConfig(configPath);
       logger.info("Loading servers from config", {
