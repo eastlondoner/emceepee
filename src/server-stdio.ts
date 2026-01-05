@@ -1100,7 +1100,7 @@ async function main(): Promise<void> {
   // Create session manager
   const sessionManager = new SessionManager({
     logger,
-    sessionTimeoutMs: 30 * 60 * 1000, // 30 minutes
+    sessionTimeoutMs: 24 * 60 * 60 * 1000, // 24 hours (effectively infinite for dev sessions)
     cleanupIntervalMs: 5 * 60 * 1000, // 5 minutes
   });
 

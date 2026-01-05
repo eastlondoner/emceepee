@@ -721,7 +721,7 @@ function registerTools(
   server.registerTool(
     "get_sampling_requests",
     {
-      description: "Get pending sampling requests from backend servers that need LLM responses. These are requests from MCP servers asking for LLM completions.",
+      description: "Get pending sampling requests from backend servers that need LLM responses. These are requests from MCP servers asking for LLM completions. URGENT: Backend servers are blocked waiting for these responses. You MUST respond promptly using respond_to_sampling.",
       inputSchema: {},
     },
     (_args, extra): ToolResponse => {
@@ -792,7 +792,7 @@ function registerTools(
   server.registerTool(
     "get_elicitations",
     {
-      description: "Get pending elicitation requests from backend servers that need user input. These are requests from MCP servers asking for form data or user confirmation.",
+      description: "Get pending elicitation requests from backend servers that need user input. These are requests from MCP servers asking for form data or user confirmation. URGENT: Backend servers are blocked waiting for user responses. You MUST respond promptly using respond_to_elicitation or the request may time out.",
       inputSchema: {},
     },
     (_args, extra): ToolResponse => {
@@ -860,7 +860,7 @@ function registerTools(
   server.registerTool(
     "await_activity",
     {
-      description: "Wait for activity (events, pending requests) or timeout. Use this to poll for changes efficiently instead of repeatedly calling get_* tools.",
+      description: "Wait for activity (events, pending requests) or timeout. Use this to poll for changes efficiently instead of repeatedly calling get_* tools. IMPORTANT: If pending_client.sampling or pending_client.elicitation counts are non-zero, you MUST respond promptly - backend servers are blocked waiting.",
       inputSchema: {
         timeout_ms: z.number().min(100).max(60000).default(30000)
           .describe("Maximum time to wait in milliseconds (100-60000, default: 30000)"),
@@ -1070,10 +1070,11 @@ function main(): void {
   logger.info("Starting MCP Proxy Server", { port, configPath });
 
   // Create session manager
+  // Use long timeout - sessions are typically long-lived dev sessions with Cursor
   const sessionManager = new SessionManager({
     logger,
-    sessionTimeoutMs: 30 * 60 * 1000, // 30 minutes
-    cleanupIntervalMs: 5 * 60 * 1000, // 5 minutes
+    sessionTimeoutMs: 24 * 60 * 60 * 1000, // 24 hours (effectively infinite for dev sessions)
+    cleanupIntervalMs: 60 * 60 * 1000, // 1 hour
   });
 
   // Load initial servers from config if provided
