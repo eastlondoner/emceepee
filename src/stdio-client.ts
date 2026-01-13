@@ -267,8 +267,11 @@ export class MCPStdioClient implements IMCPClient {
     this.setStatus("connecting");
 
     try {
-      await this.spawnProcess();
+      this.createTransport();
       await this.initializeMCP();
+
+      // Set up stderr capture after process is running
+      this.setupStderrCapture();
 
       this.startTime = new Date();
       this.setStatus("connected");
@@ -461,9 +464,10 @@ export class MCPStdioClient implements IMCPClient {
   // ---------------------------------------------------------------------------
 
   /**
-   * Spawn the server process
+   * Create the transport for the server process
+   * Note: The process is actually spawned when client.connect() is called
    */
-  private async spawnProcess(): Promise<void> {
+  private createTransport(): void {
     // Create the transport with stderr capture
     this.transport = new StdioClientTransport({
       command: this.command,
@@ -473,10 +477,7 @@ export class MCPStdioClient implements IMCPClient {
       stderr: "pipe", // Capture stderr
     });
 
-    // Set up stderr capture
-    this.setupStderrCapture();
-
-    // Set up process event handlers
+    // Set up process event handlers (stderr capture is set up after connect)
     this.transport.onclose = (): void => {
       if (!this.isClosing) {
         this.handleProcessCrash();
@@ -492,8 +493,7 @@ export class MCPStdioClient implements IMCPClient {
       this.handleProcessCrash();
     };
 
-    // Start the transport (spawns the process)
-    await this.transport.start();
+    // Note: Don't call transport.start() here - Client.connect() will do that
   }
 
   /**
@@ -780,10 +780,13 @@ export class MCPStdioClient implements IMCPClient {
 
     try {
       // Spawn new process
-      await this.spawnProcess();
+      this.createTransport();
 
       // Initialize MCP
       await this.initializeMCP();
+
+      // Set up stderr capture after process is running
+      this.setupStderrCapture();
 
       // Success!
       const attemptsTaken = this.restartAttempt;
