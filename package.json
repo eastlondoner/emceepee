@@ -1,6 +1,6 @@
 {
   "name": "emceepee",
-  "version": "0.2.8",
+  "version": "0.3.0",
   "description": "MCP proxy server with static tools for managing dynamic backend MCP servers",
   "type": "module",
   "bin": {
