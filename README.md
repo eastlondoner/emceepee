@@ -17,10 +17,11 @@ npx emceepee
 
 **emceepee solves both.** It's a proxy that exposes the entire MCP protocol as tools. Any client that supports tool calling can now:
 
-- Connect to new MCP servers dynamically
+- Connect to new MCP servers dynamically (HTTP or stdio)
+- Spawn and manage MCP server processes with automatic crash recovery
 - Access resources and resource templates
 - Use prompts
-- Receive notifications and logs
+- Receive notifications and logs (with source filtering)
 - Handle sampling requests (bidirectional LLM calls)
 - Handle elicitations (user input requests)
 
@@ -67,6 +68,57 @@ The LLM will use emceepee's tools to connect, explore, and interact with the ser
 ```
 
 emceepee exposes a **static set of tools** that never change. These tools provide access to the full MCP protocol, letting any tool-capable client use features it doesn't natively support.
+
+## Server Transports
+
+emceepee supports two transport types for connecting to backend MCP servers:
+
+### HTTP/SSE Transport
+Connect to remote MCP servers over HTTP with Server-Sent Events:
+```
+add_server(name: "myserver", url: "http://localhost:3001/mcp")
+```
+
+### Stdio Transport (Process Management)
+Spawn and manage MCP servers as child processes communicating via stdin/stdout:
+```
+add_server(name: "myserver", command: "node", args: ["server.js"])
+```
+
+**Stdio features:**
+- **Automatic crash recovery** with exponential backoff restart
+- **Stderr capture** for debugging (exposed via `get_logs` with `source: "stderr"`)
+- **Lifecycle events** for monitoring process state
+- **Configurable restart behavior** (max attempts, delays, backoff multiplier)
+
+### Process Lifecycle Events
+
+When using stdio transport, emceepee tracks the full process lifecycle:
+
+| Event | Description |
+|-------|-------------|
+| `process_started` | Process spawned successfully |
+| `process_crashed` | Process exited unexpectedly |
+| `restarting` | Attempting to restart (with attempt count) |
+| `restarted` | Successfully restarted after crash |
+| `restart_failed` | Max restart attempts exceeded |
+| `process_stopped` | Process stopped cleanly |
+
+### Restart Configuration
+
+Customize crash recovery behavior per server:
+
+```json
+{
+  "restartConfig": {
+    "enabled": true,
+    "maxAttempts": 5,
+    "baseDelayMs": 1000,
+    "maxDelayMs": 60000,
+    "backoffMultiplier": 2
+  }
+}
+```
 
 ## Tools
 
@@ -199,12 +251,26 @@ npx emceepee-http --config servers.json
 
 ### Configuration File
 
-Pre-configure backend servers:
+Pre-configure backend servers (HTTP and stdio):
 
 ```json
 {
   "servers": [
-    { "name": "myserver", "url": "http://localhost:3001/mcp" }
+    {
+      "name": "remote-server",
+      "url": "http://localhost:3001/mcp"
+    },
+    {
+      "name": "local-server",
+      "type": "stdio",
+      "command": "node",
+      "args": ["./my-mcp-server.js"],
+      "env": { "DEBUG": "true" },
+      "restartConfig": {
+        "maxAttempts": 3,
+        "baseDelayMs": 1000
+      }
+    }
   ]
 }
 ```
@@ -229,6 +295,65 @@ User: Get the player state
 
 LLM: [uses read_resource with uri="minecraft://state"]
 Player is at position (100, 64, -200), health: 18/20
+```
+
+## Library Usage
+
+emceepee can also be used as a library for building custom MCP integrations:
+
+### MCPStdioClient
+
+Spawn and manage MCP servers as child processes:
+
+```typescript
+import { MCPStdioClient } from "emceepee";
+
+const client = new MCPStdioClient({
+  name: "my-server",
+  command: "node",
+  args: ["server.js"],
+  restartConfig: {
+    maxAttempts: 5,
+    baseDelayMs: 1000,
+  },
+  onLifecycleEvent: (event) => {
+    console.log(`${event.event}: ${JSON.stringify(event)}`);
+  },
+  onLog: (log) => {
+    if (log.source === "stderr") {
+      console.error(`[stderr] ${log.data}`);
+    }
+  },
+});
+
+await client.connect();
+
+// Use the client
+const tools = await client.listTools();
+const result = await client.callTool("my-tool", { arg: "value" });
+
+// Clean shutdown
+await client.disconnect();
+```
+
+### IMCPClient Interface
+
+Both HTTP and stdio clients implement the common `IMCPClient` interface:
+
+```typescript
+import { IMCPClient, isStdioClient, isHttpClient } from "emceepee";
+
+function handleClient(client: IMCPClient) {
+  if (isStdioClient(client)) {
+    // Stdio-specific operations (e.g., access stderr buffer)
+  } else if (isHttpClient(client)) {
+    // HTTP-specific operations
+  }
+
+  // Common operations work on both
+  const tools = await client.listTools();
+  const info = client.getInfo();
+}
 ```
 
 ## Development
