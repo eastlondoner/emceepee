@@ -117,20 +117,6 @@ async function main(): Promise<void> {
     }
   });
 
-  // Wait a bit for stderr logs to come through
-  await sleep(500);
-
-  await runTest("Stderr capture working", async () => {
-    if (stderrLogs.length === 0) {
-      throw new Error("No stderr logs captured");
-    }
-    const hasStartupLog = stderrLogs.some((l) => l.data.includes("echo-server"));
-    if (!hasStartupLog) {
-      throw new Error("Expected startup logs from echo server");
-    }
-    log("info", `Captured ${stderrLogs.length} stderr log entries`);
-  });
-
   await runTest("List tools", async () => {
     if (!client) throw new Error("Client not available");
     const tools = await client.listTools();
@@ -185,6 +171,22 @@ async function main(): Promise<void> {
     }
 
     log("info", `Slow echo completed in ${elapsed}ms`);
+  });
+
+  // Stderr test moved here so logs from tool calls are captured
+  await runTest("Stderr capture working", async () => {
+    // Give a moment for any async stderr to flush
+    await sleep(100);
+
+    if (stderrLogs.length === 0) {
+      throw new Error("No stderr logs captured");
+    }
+    // Check for logs from tool calls (Listing tools, echo, etc.)
+    const hasToolLog = stderrLogs.some((l) => l.data.includes("Listing tools") || l.data.includes("echo-server"));
+    if (!hasToolLog) {
+      throw new Error("Expected logs from echo server tool calls");
+    }
+    log("info", `Captured ${stderrLogs.length} stderr log entries`);
   });
 
   await runTest("Get client info", async () => {
