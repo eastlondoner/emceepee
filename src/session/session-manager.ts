@@ -149,7 +149,8 @@ export class SessionManager {
   public async addServer(
     sessionId: string,
     name: string,
-    url: string
+    url: string,
+    options?: { headers?: Record<string, string> }
   ): Promise<BackendConnection> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -157,7 +158,7 @@ export class SessionManager {
     }
 
     // 1. Add to global config registry
-    const isNew = this.serverConfigs.addConfig(name, url, sessionId);
+    const isNew = this.serverConfigs.addConfig(name, url, { headers: options?.headers }, sessionId);
 
     // 2. Connect THIS session to the server
     const serverConfig = this.serverConfigs.getConfig(name);
@@ -486,11 +487,12 @@ export class SessionManager {
    */
   private createHttpClient(
     session: SessionState,
-    serverConfig: { name: string; url: string }
+    serverConfig: { name: string; url: string; headers?: Record<string, string> }
   ): MCPHttpClient {
     return new MCPHttpClient({
       name: serverConfig.name,
       url: serverConfig.url,
+      headers: serverConfig.headers,
       onStatusChange: (status, error): void => {
         session.setConnectionStatus(serverConfig.name, status, error);
       },
