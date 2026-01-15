@@ -50,6 +50,8 @@ export interface MCPHttpClientOptions {
   name: string;
   /** HTTP URL of the MCP server endpoint */
   url: string;
+  /** Custom headers to send with requests (e.g., Authorization) */
+  headers?: Record<string, string>;
   /** Callback when the connection status changes */
   onStatusChange?: (status: BackendServerStatus, error?: string) => void;
   /** Callback when a notification is received from the server */
@@ -96,6 +98,7 @@ const HEALTH_CHECK_DEGRADED_THRESHOLD = 3; // 3 consecutive failures
 export class MCPHttpClient {
   private readonly name: string;
   private readonly url: string;
+  private readonly headers: Record<string, string> | undefined;
   private readonly onStatusChange:
     | ((status: BackendServerStatus, error?: string) => void)
     | undefined;
@@ -139,6 +142,7 @@ export class MCPHttpClient {
   constructor(options: MCPHttpClientOptions) {
     this.name = options.name;
     this.url = options.url;
+    this.headers = options.headers;
     this.onStatusChange = options.onStatusChange;
     this.onNotification = options.onNotification;
     this.onLog = options.onLog;
@@ -244,8 +248,12 @@ export class MCPHttpClient {
     this.setStatus("connecting");
 
     try {
-      // Create the transport
-      this.transport = new StreamableHTTPClientTransport(new URL(this.url));
+      // Create the transport with optional custom headers
+      const transportOptions: { requestInit?: { headers: Record<string, string> } } = {};
+      if (this.headers) {
+        transportOptions.requestInit = { headers: this.headers };
+      }
+      this.transport = new StreamableHTTPClientTransport(new URL(this.url), transportOptions);
 
       // Create the client with capabilities for receiving server requests
       this.client = new Client(
@@ -693,8 +701,12 @@ export class MCPHttpClient {
     }
 
     try {
-      // Create new transport
-      this.transport = new StreamableHTTPClientTransport(new URL(this.url));
+      // Create new transport with optional custom headers
+      const transportOptions: { requestInit?: { headers: Record<string, string> } } = {};
+      if (this.headers) {
+        transportOptions.requestInit = { headers: this.headers };
+      }
+      this.transport = new StreamableHTTPClientTransport(new URL(this.url), transportOptions);
 
       // Create new client
       this.client = new Client(

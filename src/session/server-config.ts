@@ -21,6 +21,8 @@ export interface HttpServerConfig {
   type: "http";
   /** HTTP URL of the MCP server endpoint */
   url: string;
+  /** Custom headers to send with requests (e.g., Authorization) */
+  headers?: Record<string, string>;
   /** When this config was added */
   addedAt: Date;
   /** Session ID that added this config (for logging) */
@@ -97,15 +99,22 @@ export class ServerConfigRegistry {
    *
    * @param name - Unique name for this server
    * @param url - HTTP URL of the MCP server endpoint
+   * @param options - Optional configuration options
    * @param addedBy - Optional session ID that added this config
    * @returns true if new config, false if updated existing
    */
-  public addConfig(name: string, url: string, addedBy?: string): boolean {
+  public addConfig(
+    name: string,
+    url: string,
+    options?: { headers?: Record<string, string> },
+    addedBy?: string
+  ): boolean {
     const existing = this.configs.has(name);
     this.configs.set(name, {
       name,
       type: "http",
       url,
+      headers: options?.headers,
       addedAt: new Date(),
       addedBy,
     });
@@ -114,6 +123,7 @@ export class ServerConfigRegistry {
       server: name,
       type: "http",
       url,
+      hasHeaders: options?.headers !== undefined,
       addedBy,
     });
 
