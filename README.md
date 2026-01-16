@@ -194,6 +194,105 @@ Example: Get only protocol logs by excluding stderr/stdout:
 | `get_timer` | Get timer details |
 | `delete_timer` | Delete a timer (returns timer body) |
 
+### Codemode (Reduced-Context API)
+| Tool | Description |
+|------|-------------|
+| `codemode_search` | Search for capabilities across all servers |
+| `codemode_execute` | Execute JavaScript with access to `mcp.*` API |
+
+## Codemode API
+
+Codemode is a reduced-context API that exposes just **2 tools** instead of the full set. This dramatically reduces token usage when AI needs to perform complex multi-step MCP operations.
+
+### Tools
+
+**`codemode_search`** - Search for tools, resources, prompts, or servers using regex patterns:
+```json
+{
+  "query": "file|read",
+  "type": "tools",
+  "server": "myserver",
+  "includeSchemas": false
+}
+```
+
+**`codemode_execute`** - Run JavaScript in a sandboxed environment:
+```json
+{
+  "code": "const tools = await mcp.listTools(); return tools.length;",
+  "timeout": 30000
+}
+```
+
+### The mcp.* API
+
+Inside `codemode_execute`, your code has access to:
+
+```javascript
+// Server discovery
+await mcp.listServers()
+
+// Tool operations
+await mcp.listTools(serverPattern?)
+await mcp.callTool(server, tool, args?)
+
+// Resource operations
+await mcp.listResources(serverPattern?)
+await mcp.listResourceTemplates(serverPattern?)
+await mcp.readResource(server, uri)
+
+// Prompt operations
+await mcp.listPrompts(serverPattern?)
+await mcp.getPrompt(server, name, args?)
+
+// Utilities
+await mcp.sleep(ms)    // max 5 seconds per call
+mcp.log(...args)       // captured in result.logs
+```
+
+### Example: Multi-Step Operation
+
+```javascript
+// Find all "search" tools and call the first one
+const tools = await mcp.listTools();
+const searchTools = tools.filter(t => t.name.includes('search'));
+
+if (searchTools.length === 0) {
+  return { error: 'No search tools found' };
+}
+
+const tool = searchTools[0];
+mcp.log(`Calling ${tool.server}/${tool.name}`);
+
+const result = await mcp.callTool(tool.server, tool.name, {
+  query: 'example'
+});
+
+return {
+  tool: tool.name,
+  server: tool.server,
+  result: result.content
+};
+```
+
+### Security Features
+
+- **Sandboxed execution** - Blocked globals: `process`, `require`, `eval`, `fetch`, `setTimeout`, `Function`, etc.
+- **Timeout enforcement** - 1 second to 5 minutes (default 30s)
+- **MCP call limits** - Maximum 100 `mcp.*` calls per execution
+- **Code size limits** - Maximum 100KB of code
+
+### Configuration
+
+Codemode is enabled by default. To disable:
+
+```typescript
+// When using emceepee as a library
+registerTools(server, sessionManager, sessions, requestTracker, {
+  codemodeEnabled: false
+});
+```
+
 ## Context Info
 
 Every tool response may include additional context information as a second JSON text block. This provides real-time status without requiring explicit polling:
@@ -369,19 +468,15 @@ bun run build            # Production build
 
 ### Testing
 
-The test suite includes integration tests for the stdio client:
-
 ```bash
 bun run test             # Run all tests
-bun run test:stdio       # Run stdio client tests specifically
+bun run test:stdio       # Run stdio client tests
+bun run test:codemode    # Run codemode tests
 ```
 
 Tests cover:
-- Connection lifecycle (connect, disconnect)
-- Tool listing and invocation
-- Stderr capture with source indication
-- Crash handling and automatic restart with exponential backoff
-- Lifecycle events (process_started, crashed, restarting, restarted, stopped)
+- **Stdio client**: Connection lifecycle, tool invocation, stderr capture, crash recovery, lifecycle events
+- **Codemode**: Sandbox isolation, timeout enforcement, API bindings, search/execute functionality, error handling
 
 ## License
 
