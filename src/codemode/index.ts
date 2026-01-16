@@ -55,3 +55,27 @@ export {
   getMatchingClients,
   getClient,
 } from "./api-bindings.js";
+
+// Search tool
+export type { SearchOptions } from "./search.js";
+export {
+  search,
+  findToolByName,
+  listAllCapabilities,
+} from "./search.js";
+
+// Execute tool
+export type { ExecuteOptions } from "./execute.js";
+export {
+  execute,
+  executeSimple,
+  executeWithTimeout,
+  validateCode,
+  validateTimeout,
+  validateExecuteRequest,
+  isSuccess,
+  isTimeout,
+  isCallLimitExceeded,
+  summarizeResult,
+  EXECUTE_LIMITS,
+} from "./execute.js";
