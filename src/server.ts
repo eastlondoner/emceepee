@@ -29,6 +29,15 @@ import { createConsoleLogger } from "./logging.js";
 import { RequestTracker } from "./request-tracker.js";
 import { generateWaterfallHTML, generateWaterfallJSON } from "./waterfall-ui.js";
 
+// Codemode imports
+import {
+  search,
+  execute,
+  validateExecuteRequest,
+  EXECUTE_LIMITS,
+} from "./codemode/index.js";
+import type { SearchQuery } from "./codemode/index.js";
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -237,12 +246,19 @@ function toolJson(data: unknown, session?: SessionState): ToolResponse {
 // Tool Registration
 // =============================================================================
 
+interface RegisterToolsOptions {
+  /** Enable codemode tools (codemode_search, codemode_execute). Default: true */
+  codemodeEnabled?: boolean;
+}
+
 function registerTools(
   server: McpServer,
   sessionManager: SessionManager,
   sessions: Map<string, string>,
-  requestTracker: RequestTracker
+  requestTracker: RequestTracker,
+  options: RegisterToolsOptions = {}
 ): void {
+  const { codemodeEnabled = true } = options;
   // ---------------------------------------------------------------------------
   // Server Management Tools
   // ---------------------------------------------------------------------------
@@ -1467,6 +1483,111 @@ function registerTools(
       }, session);
     }
   );
+
+  // ---------------------------------------------------------------------------
+  // Codemode Tools (reduced-context API)
+  // ---------------------------------------------------------------------------
+
+  if (codemodeEnabled) {
+    server.registerTool(
+      "codemode_search",
+      {
+        description:
+          "Search for MCP capabilities (tools, resources, prompts, servers) across all connected backend servers. " +
+          "Returns compact results that can be used to discover available functionality. " +
+          "Use regex patterns in the query to match names and descriptions.",
+        inputSchema: {
+          query: z.string().describe(
+            "Search query - matches against names and descriptions. Supports regex patterns."
+          ),
+          type: z.enum(["tools", "resources", "prompts", "servers", "all"])
+            .default("all")
+            .describe("Type of capability to search for"),
+          server: z.string().optional().describe(
+            "Filter by server name (regex pattern). Omit to search all servers."
+          ),
+          includeSchemas: z.boolean().default(false).describe(
+            "Include full input schemas for tools (increases response size)"
+          ),
+        },
+      },
+      async ({ query, type, server: serverPattern, includeSchemas }, extra): Promise<ToolResponse> => {
+        const session = getSessionForTool(sessionManager, extra, sessions);
+        if (!session) {
+          return toolError("Session not found");
+        }
+
+        try {
+          const searchQuery: SearchQuery = {
+            query,
+            type,
+            server: serverPattern,
+            includeSchemas,
+          };
+
+          const results = await search(searchQuery, {
+            session,
+            sessionManager,
+          });
+
+          return toolJson(results, session);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return toolError(`Search failed: ${message}`);
+        }
+      }
+    );
+
+    server.registerTool(
+      "codemode_execute",
+      {
+        description:
+          "Execute JavaScript code in a sandboxed environment with access to MCP operations via the `mcp.*` API. " +
+          "Use this to perform complex operations that would require multiple tool calls. " +
+          "Available API: mcp.listServers(), mcp.listTools(pattern?), mcp.callTool(server, tool, args?), " +
+          "mcp.listResources(pattern?), mcp.readResource(server, uri), mcp.listPrompts(pattern?), " +
+          "mcp.getPrompt(server, name, args?), mcp.sleep(ms), mcp.log(...args). " +
+          "Code runs with async/await support. Return a value to include it in the response.",
+        inputSchema: {
+          code: z.string().describe(
+            "JavaScript code to execute. Has access to 'mcp' object for MCP operations. " +
+            "Async/await is supported. Return a value to include it in the result."
+          ),
+          timeout: z.number()
+            .min(EXECUTE_LIMITS.MIN_TIMEOUT_MS)
+            .max(EXECUTE_LIMITS.MAX_TIMEOUT_MS)
+            .default(EXECUTE_LIMITS.DEFAULT_TIMEOUT_MS)
+            .describe(
+              `Execution timeout in milliseconds (${String(EXECUTE_LIMITS.MIN_TIMEOUT_MS)}ms - ${String(EXECUTE_LIMITS.MAX_TIMEOUT_MS)}ms, default ${String(EXECUTE_LIMITS.DEFAULT_TIMEOUT_MS)}ms)`
+            ),
+        },
+      },
+      async ({ code, timeout }, extra): Promise<ToolResponse> => {
+        const session = getSessionForTool(sessionManager, extra, sessions);
+        if (!session) {
+          return toolError("Session not found");
+        }
+
+        // Validate request
+        const validationError = validateExecuteRequest({ code, timeout });
+        if (validationError) {
+          return toolError(validationError);
+        }
+
+        try {
+          const result = await execute(
+            { code, timeout },
+            { session, sessionManager }
+          );
+
+          return toolJson(result, session);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return toolError(`Execution failed: ${message}`);
+        }
+      }
+    );
+  }
 }
 
 // =============================================================================
