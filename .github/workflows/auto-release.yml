@@ -1,0 +1,57 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'package.json'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for tags and changelog
+
+      - name: Check if version changed
+        id: version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          git show HEAD~1:package.json > /tmp/old-package.json 2>/dev/null || echo '{"version":"0.0.0"}' > /tmp/old-package.json
+          OLD_VERSION=$(node -p "require('/tmp/old-package.json').version")
+          
+          echo "Current version: $CURRENT_VERSION"
+          echo "Previous version: $OLD_VERSION"
+          
+          if [ "$CURRENT_VERSION" != "$OLD_VERSION" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Get last version tag (v* pattern only)
+          LAST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n1 || echo "")
+          
+          if [ -n "$LAST_TAG" ]; then
+            CHANGES=$(git log "$LAST_TAG"..HEAD --oneline --no-merges | head -20)
+            CHANGELOG_URL="**Full Changelog**: https://github.com/${{ github.repository }}/compare/$LAST_TAG...v$VERSION"
+          else
+            CHANGES=$(git log --oneline --no-merges -10)
+            CHANGELOG_URL="**First Release**"
+          fi
+          
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --notes "## Changes
+
+$CHANGES
+
+$CHANGELOG_URL"
