@@ -345,6 +345,7 @@ function registerTools(
       inputSchema: {
         name: z.string().describe("Unique name for this server"),
         url: z.string().url().optional().describe("HTTP URL of the MCP server endpoint (for HTTP transport)"),
+        headers: z.record(z.string()).optional().describe("Custom headers to send with HTTP requests (e.g., {\"Authorization\": \"Bearer token\"})"),
         command: z.string().optional().describe("Command to spawn (for stdio transport, e.g., 'node', 'npx', 'python')"),
         args: z.array(z.string()).optional().describe("Arguments for the command (for stdio transport)"),
         env: z.record(z.string()).optional().describe("Environment variables for the spawned process (stdio only)"),
@@ -358,7 +359,7 @@ function registerTools(
         }).optional().describe("Restart configuration for stdio servers"),
       },
     },
-    async ({ name, url, command, args, env, cwd, restartConfig }): Promise<ToolResponse> => {
+    async ({ name, url, headers, command, args, env, cwd, restartConfig }): Promise<ToolResponse> => {
       const session = getSession(getActiveSession());
       if (!session) {
         return toolError("Session not initialized");
@@ -378,7 +379,7 @@ function registerTools(
 
         if (url) {
           // HTTP transport
-          connection = await sessionManager.addServer(session.sessionId, name, url);
+          connection = await sessionManager.addServer(session.sessionId, name, url, { headers });
           serverDescription = url;
         } else if (command) {
           // Stdio transport
