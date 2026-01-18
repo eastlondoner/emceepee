@@ -38,10 +38,11 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           
-          # Get commits since last tag
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          # Get last version tag (v* pattern only)
+          LAST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -n1 || echo "")
+          
           if [ -n "$LAST_TAG" ]; then
-            CHANGES=$(git log $LAST_TAG..HEAD --oneline --no-merges | head -20)
+            CHANGES=$(git log "$LAST_TAG"..HEAD --oneline --no-merges | head -20)
             CHANGELOG_URL="**Full Changelog**: https://github.com/${{ github.repository }}/compare/$LAST_TAG...v$VERSION"
           else
             CHANGES=$(git log --oneline --no-merges -10)
