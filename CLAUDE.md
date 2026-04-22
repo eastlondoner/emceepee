@@ -118,6 +118,27 @@ bun run dev -- --config ./servers.json
 }
 ```
 
+## OAuth backend
+
+emceepee-http can proxy OAuth 2.1 + PKCE + DCR on behalf of the calling MCP
+client so that OAuth-protected upstream servers (e.g. `disk-mcp-cf`) work
+transparently. See [docs/OAUTH_BACKEND.md](./docs/OAUTH_BACKEND.md) for the
+flow.
+
+Invariant: emceepee-http has no frontend authentication. It binds to
+`EMCEEPEE_HOST=127.0.0.1` by default; non-loopback binds log a warning.
+OAuth upstream support is not available in stdio mode — use emceepee-http.
+
+Environment variables (see `.env.example`):
+
+- `PORT` (default 8080)
+- `EMCEEPEE_HOST` (default 127.0.0.1)
+- `EMCEEPEE_BASE_URL` (default `http://localhost:${PORT}`)
+- `EMCEEPEE_DCR_STORE_PATH` (default `~/.emceepee/dcr-clients.json`)
+
+Upstream tokens are in-memory only; DCR client registrations persist keyed
+by authorization-server issuer URL.
+
 ## Testing Guide
 
 See [MCP_TESTING_GUIDE.md](./MCP_TESTING_GUIDE.md) for detailed instructions on:

@@ -86,6 +86,13 @@ export interface ReconciliationResult {
 }
 
 /**
+ * Upstream authentication mode for an HTTP backend (mirrors HttpAuthMode
+ * in ./session/server-config.ts — kept here so the public ProxyConfig type
+ * doesn't pull from the session internals module).
+ */
+export type HttpAuthMode = "none" | "oauth";
+
+/**
  * Configuration for a backend HTTP MCP server
  */
 export interface HttpServerConfig {
@@ -93,6 +100,12 @@ export interface HttpServerConfig {
   name: string;
   /** HTTP URL of the MCP server endpoint */
   url: string;
+  /** Custom headers to send with requests. Ignored when authMode === "oauth". */
+  headers?: Record<string, string>;
+  /** Upstream auth mode (default: "none"). */
+  authMode?: HttpAuthMode;
+  /** Optional OAuth scopes (only meaningful when authMode === "oauth"). */
+  oauthScopes?: string[];
 }
 
 /**

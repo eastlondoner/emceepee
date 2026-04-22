@@ -10,6 +10,7 @@
  * - Buffer manager (notifications/logs)
  */
 
+import type { ClientCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import type { IMCPClient } from "../client-interface.js";
 import type { StructuredLogger } from "../logging.js";
 import {
@@ -106,6 +107,12 @@ export class SessionState {
 
   /** Per-session TimerManager (uses this session's EventSystem) */
   public readonly timerManager: TimerManager;
+
+  /**
+   * Capabilities advertised by the calling MCP client. Populated lazily on
+   * first use (e.g. when a tool handler decides how to format an elicitation).
+   */
+  public clientCapabilities: ClientCapabilities | undefined;
 
   /** Logger for this session */
   private readonly logger?: StructuredLogger;

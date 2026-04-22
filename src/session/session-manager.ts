@@ -15,6 +15,7 @@ import {
   ServerConfigRegistry,
   type ServerConfig,
   type ServerConfigRegistryOptions,
+  type HttpServerConfig,
   isHttpConfig,
   isStdioConfig,
 } from "./server-config.js";
@@ -27,6 +28,10 @@ import { MCPHttpClient } from "../client.js";
 import { MCPStdioClient, type LogSource } from "../stdio-client.js";
 import type { IMCPClient } from "../client-interface.js";
 import type { ServerInfo, StdioRestartConfig } from "../types.js";
+import type { BackendTokenStore } from "../auth/backend/token-store.js";
+import type { DcrStore } from "../auth/backend/dcr-store.js";
+import type { PendingFlowRegistry } from "../auth/backend/pending-flows.js";
+import { makeOAuthClientProvider } from "../auth/backend/oauth-provider.js";
 
 /**
  * Configuration for SessionManager
@@ -40,6 +45,14 @@ export interface SessionManagerConfig {
   sessionStateConfig?: SessionStateConfig;
   /** Logger for structured logging */
   logger?: StructuredLogger;
+  /** Token store for upstream OAuth (required to support authMode="oauth"). */
+  tokenStore?: BackendTokenStore;
+  /** DCR persistence for upstream OAuth. */
+  dcrStore?: DcrStore;
+  /** Pending-flow registry for upstream OAuth. */
+  pendingFlows?: PendingFlowRegistry;
+  /** emceepee-http base URL, for the OAuth redirect_uri (e.g. "http://localhost:8080"). */
+  baseUrl?: string;
 }
 
 const DEFAULT_CONFIG: SessionManagerConfig = {
@@ -61,11 +74,19 @@ export class SessionManager {
   private readonly serverConfigs: ServerConfigRegistry;
   private readonly config: SessionManagerConfig;
   private readonly logger?: StructuredLogger;
+  private readonly tokenStore: BackendTokenStore | undefined;
+  private readonly dcrStore: DcrStore | undefined;
+  private readonly pendingFlows: PendingFlowRegistry | undefined;
+  private readonly baseUrl: string | undefined;
   private cleanupIntervalHandle: NodeJS.Timeout | null = null;
 
   constructor(config: Partial<SessionManagerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.logger = config.logger;
+    this.tokenStore = config.tokenStore;
+    this.dcrStore = config.dcrStore;
+    this.pendingFlows = config.pendingFlows;
+    this.baseUrl = config.baseUrl;
 
     const registryOptions: ServerConfigRegistryOptions = { logger: config.logger };
     this.serverConfigs = new ServerConfigRegistry(registryOptions);
@@ -150,7 +171,11 @@ export class SessionManager {
     sessionId: string,
     name: string,
     url: string,
-    options?: { headers?: Record<string, string> }
+    options?: {
+      headers?: Record<string, string>;
+      authMode?: "none" | "oauth";
+      oauthScopes?: string[];
+    }
   ): Promise<BackendConnection> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -158,7 +183,16 @@ export class SessionManager {
     }
 
     // 1. Add to global config registry
-    const isNew = this.serverConfigs.addConfig(name, url, { headers: options?.headers }, sessionId);
+    const isNew = this.serverConfigs.addConfig(
+      name,
+      url,
+      {
+        headers: options?.headers,
+        authMode: options?.authMode,
+        oauthScopes: options?.oauthScopes,
+      },
+      sessionId
+    );
 
     // 2. Connect THIS session to the server
     const serverConfig = this.serverConfigs.getConfig(name);
@@ -433,7 +467,7 @@ export class SessionManager {
     let client: IMCPClient;
 
     if (isHttpConfig(serverConfig)) {
-      client = this.createHttpClient(session, serverConfig);
+      client = this.createHttpClient(session, serverConfig satisfies HttpServerConfig);
     } else if (isStdioConfig(serverConfig)) {
       client = this.createStdioClient(session, serverConfig);
     } else {
@@ -487,12 +521,20 @@ export class SessionManager {
    */
   private createHttpClient(
     session: SessionState,
-    serverConfig: { name: string; url: string; headers?: Record<string, string> }
+    serverConfig: HttpServerConfig
   ): MCPHttpClient {
+    const authMode = serverConfig.authMode ?? "none";
+    const authProvider =
+      authMode === "oauth"
+        ? this.buildOAuthProvider(session, serverConfig)
+        : undefined;
+
     return new MCPHttpClient({
       name: serverConfig.name,
       url: serverConfig.url,
-      headers: serverConfig.headers,
+      headers: authMode === "oauth" ? undefined : serverConfig.headers,
+      authMode,
+      authProvider,
       onStatusChange: (status, error): void => {
         session.setConnectionStatus(serverConfig.name, status, error);
       },
@@ -569,6 +611,35 @@ export class SessionManager {
         });
       },
     });
+  }
+
+  /**
+   * Build an EmceepeeOAuthClientProvider for the given upstream server.
+   * Throws if the stores weren't wired on the SessionManager — this is the
+   * invariant that stdio mode enforces by rejecting authMode="oauth" upfront.
+   */
+  private buildOAuthProvider(
+    session: SessionState,
+    serverConfig: HttpServerConfig
+  ): ReturnType<typeof makeOAuthClientProvider> {
+    if (!this.tokenStore || !this.dcrStore || !this.pendingFlows || !this.baseUrl) {
+      throw new Error(
+        `authMode="oauth" requires tokenStore, dcrStore, pendingFlows, and baseUrl ` +
+          `on the SessionManager. This should only be reached in emceepee-http mode.`
+      );
+    }
+    const options: Parameters<typeof makeOAuthClientProvider>[0] = {
+      serverName: serverConfig.name,
+      serverUrl: serverConfig.url,
+      baseUrl: this.baseUrl,
+      sessionId: session.sessionId,
+      tokenStore: this.tokenStore,
+      dcrStore: this.dcrStore,
+      pendingFlows: this.pendingFlows,
+    };
+    if (this.logger) options.logger = this.logger;
+    if (serverConfig.oauthScopes) options.scopes = serverConfig.oauthScopes;
+    return makeOAuthClientProvider(options);
   }
 
   /**

@@ -346,6 +346,8 @@ function registerTools(
         name: z.string().describe("Unique name for this server"),
         url: z.string().url().optional().describe("HTTP URL of the MCP server endpoint (for HTTP transport)"),
         headers: z.record(z.string()).optional().describe("Custom headers to send with HTTP requests (e.g., {\"Authorization\": \"Bearer token\"})"),
+        authMode: z.enum(["none", "oauth"]).optional().describe("HTTP auth mode. NOTE: 'oauth' is not supported in stdio mode — use emceepee-http instead."),
+        oauthScopes: z.array(z.string()).optional().describe("OAuth scopes (not supported in stdio mode)."),
         command: z.string().optional().describe("Command to spawn (for stdio transport, e.g., 'node', 'npx', 'python')"),
         args: z.array(z.string()).optional().describe("Arguments for the command (for stdio transport)"),
         env: z.record(z.string()).optional().describe("Environment variables for the spawned process (stdio only)"),
@@ -359,7 +361,7 @@ function registerTools(
         }).optional().describe("Restart configuration for stdio servers"),
       },
     },
-    async ({ name, url, headers, command, args, env, cwd, restartConfig }): Promise<ToolResponse> => {
+    async ({ name, url, headers, authMode, command, args, env, cwd, restartConfig }): Promise<ToolResponse> => {
       const session = getSession(getActiveSession());
       if (!session) {
         return toolError("Session not initialized");
@@ -371,6 +373,13 @@ function registerTools(
       }
       if (!url && !command) {
         return toolError("Must provide either 'url' (for HTTP transport) or 'command' (for stdio transport)");
+      }
+
+      if (url && authMode === "oauth") {
+        return toolError(
+          "OAuth-protected upstreams are not supported in stdio mode. " +
+            "Run emceepee-http (e.g. `bun run dev:http`) and connect your MCP client to its /mcp endpoint instead."
+        );
       }
 
       try {
@@ -1530,8 +1539,18 @@ async function main(): Promise<void> {
 
       for (const server of config.servers) {
         if (isHttpServerConfig(server)) {
+          if (server.authMode === "oauth") {
+            logger.warn("skipping_oauth_server_in_stdio_mode", {
+              name: server.name,
+              url: server.url,
+              reason: "OAuth upstream auth requires emceepee-http (no HTTP surface for the callback in stdio mode)",
+            });
+            continue;
+          }
           logger.info("Adding HTTP server config", { name: server.name, url: server.url });
-          sessionManager.getServerConfigs().addConfig(server.name, server.url);
+          sessionManager.getServerConfigs().addConfig(server.name, server.url, {
+            headers: server.headers,
+          });
         } else if (isStdioServerConfig(server)) {
           logger.info("Adding stdio server config", { name: server.name, command: server.command });
           sessionManager.getServerConfigs().addStdioConfig(
@@ -1558,8 +1577,18 @@ async function main(): Promise<void> {
 
       for (const server of config.servers) {
         if (isHttpServerConfig(server)) {
+          if (server.authMode === "oauth") {
+            logger.warn("skipping_oauth_server_in_stdio_mode", {
+              name: server.name,
+              url: server.url,
+              reason: "OAuth upstream auth requires emceepee-http (no HTTP surface for the callback in stdio mode)",
+            });
+            continue;
+          }
           logger.info("Adding HTTP server config", { name: server.name, url: server.url });
-          sessionManager.getServerConfigs().addConfig(server.name, server.url);
+          sessionManager.getServerConfigs().addConfig(server.name, server.url, {
+            headers: server.headers,
+          });
         } else if (isStdioServerConfig(server)) {
           logger.info("Adding stdio server config", { name: server.name, command: server.command });
           sessionManager.getServerConfigs().addStdioConfig(

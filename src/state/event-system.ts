@@ -23,6 +23,7 @@ export type ProxyEventType =
   // Pending requests
   | "elicitation_request"
   | "elicitation_expired"
+  | "elicitation_completed"
   | "sampling_request"
   | "sampling_expired"
   // Backend notifications

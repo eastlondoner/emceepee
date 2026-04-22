@@ -79,6 +79,13 @@ Connect to remote MCP servers over HTTP with Server-Sent Events:
 add_server(name: "myserver", url: "http://localhost:3001/mcp")
 ```
 
+For OAuth-protected upstream servers (e.g. `disk-mcp-cf`), emceepee-http
+can broker OAuth 2.1 + PKCE + Dynamic Client Registration on your behalf.
+Add `authMode: "oauth"` to `add_server`; see
+[docs/OAUTH_BACKEND.md](./docs/OAUTH_BACKEND.md) for the full flow. This
+feature is available in `emceepee-http` only (not stdio mode) and is
+intended for local development on loopback.
+
 ### Stdio Transport (Process Management)
 Spawn and manage MCP servers as child processes communicating via stdin/stdout:
 ```
