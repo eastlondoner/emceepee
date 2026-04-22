@@ -2006,6 +2006,12 @@ function main(): void {
       dcrStore,
       pendingFlows,
       logger,
+      // Pin the verifier captured when the authorize URL was registered.
+      // A concurrent second auth() call on the same server runs
+      // startAuthorization independently and overwrites
+      // tokenStore.codeVerifier; without pinning, this callback would
+      // exchange the code against the wrong PKCE verifier and fail.
+      pinnedCodeVerifier: flow.codeVerifier,
     };
     if (serverConfig.oauthScopes) providerOpts.scopes = serverConfig.oauthScopes;
     const provider = makeOAuthClientProvider(providerOpts);

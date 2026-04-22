@@ -37,6 +37,14 @@ export interface MakeOAuthClientProviderOptions {
   dcrStore: DcrStore;
   pendingFlows: PendingFlowRegistry;
   logger?: StructuredLogger;
+  /**
+   * When set, `codeVerifier()` returns this value instead of reading the
+   * (shared) token store. Used by the /oauth/callback handler to pin the
+   * verifier captured at `redirectToAuthorization` time, so a concurrent
+   * second flow that overwrote `tokenStore.codeVerifier` cannot break the
+   * first flow's PKCE exchange.
+   */
+  pinnedCodeVerifier?: string;
 }
 
 /**
@@ -72,6 +80,7 @@ export function makeOAuthClientProvider(
     dcrStore,
     pendingFlows,
     logger,
+    pinnedCodeVerifier,
   } = options;
 
   const redirectUri = `${trimTrailingSlash(baseUrl)}/oauth/callback`;
@@ -179,6 +188,10 @@ export function makeOAuthClientProvider(
     },
 
     codeVerifier(): string {
+      // A pinned verifier (from a PendingFlow consumed at /oauth/callback)
+      // wins over the shared token-store value, which a concurrent second
+      // auth() call may have overwritten during single-flight dedupe.
+      if (pinnedCodeVerifier) return pinnedCodeVerifier;
       const entry = tokenStore.get(serverName);
       if (!entry?.codeVerifier) {
         throw new Error(`No PKCE code verifier stored for '${serverName}'`);

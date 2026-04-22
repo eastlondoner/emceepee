@@ -194,6 +194,87 @@ describe("OAuth backend integration", () => {
     expect(harness.upstream.stats.dcrRegistrations).toBe(dcrCountBefore);
   });
 
+  test("concurrent single-flight: callback's pinned verifier beats stomped token-store value", async () => {
+    // Two auth() calls race for the same server. Each runs its own
+    // startAuthorization and calls saveCodeVerifier (overwriting the
+    // shared token-store field). The second caller's redirect hits our
+    // single-flight dedupe and is handed back caller-1's authorize URL,
+    // but by then token-store.codeVerifier is caller-2's. The callback
+    // for caller-1's state must still use caller-1's pinned verifier,
+    // not the overwritten value, otherwise the token exchange fails.
+    const baseUrl = "http://localhost:9876";
+
+    const authUrls: { first?: string; second?: string } = {};
+
+    const makeProvider = (sessionId: string, slot: "first" | "second"): ReturnType<typeof makeOAuthClientProvider> => {
+      const opts: Parameters<typeof makeOAuthClientProvider>[0] = {
+        serverName: "disk",
+        serverUrl: harness.upstream.mcpUrl,
+        baseUrl,
+        sessionId,
+        tokenStore: harness.tokenStore,
+        dcrStore: harness.dcrStore,
+        pendingFlows: harness.pendingFlows,
+      };
+      const p = makeOAuthClientProvider(opts);
+      p.onAuthorizationRequired = (url: string): void => {
+        authUrls[slot] = url;
+      };
+      return p;
+    };
+
+    // First auth() — becomes the pending flow owner.
+    const p1 = makeProvider("sess-A", "first");
+    await p1.ensureIssuer();
+    const r1 = await auth(p1, { serverUrl: harness.upstream.mcpUrl });
+    expect(r1).toBe("REDIRECT");
+
+    // Second auth() — should dedupe against the in-flight pending flow
+    // but will internally run startAuthorization + saveCodeVerifier and
+    // STOMP the token-store's codeVerifier field.
+    const p2 = makeProvider("sess-B", "second");
+    await p2.ensureIssuer();
+    const r2 = await auth(p2, { serverUrl: harness.upstream.mcpUrl });
+    expect(r2).toBe("REDIRECT");
+
+    // Single-flight contract: both callers see the same authorize URL.
+    expect(authUrls.first).toBeDefined();
+    expect(authUrls.second).toBe(authUrls.first);
+
+    // Follow the first caller's authorize URL (user completes consent).
+    const authRes = await fetch(authUrls.first!, { redirect: "manual" });
+    expect(authRes.status).toBe(302);
+    const callbackUrl = new URL(authRes.headers.get("location") ?? "");
+    const code = callbackUrl.searchParams.get("code");
+    const stateParam = callbackUrl.searchParams.get("state");
+    if (!code || !stateParam) throw new Error("no code/state");
+
+    // Simulate /oauth/callback: consume the flow and run auth() again
+    // with a provider that PINS the flow's captured verifier.
+    const flow = harness.pendingFlows.consumeByState(stateParam);
+    expect(flow).toBeDefined();
+    if (!flow) throw new Error("flow disappeared");
+
+    const callbackOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
+      serverName: "disk",
+      serverUrl: harness.upstream.mcpUrl,
+      baseUrl,
+      sessionId: flow.sessionId,
+      tokenStore: harness.tokenStore,
+      dcrStore: harness.dcrStore,
+      pendingFlows: harness.pendingFlows,
+      pinnedCodeVerifier: flow.codeVerifier,
+    };
+    const callbackProvider = makeOAuthClientProvider(callbackOpts);
+    await callbackProvider.ensureIssuer();
+    const finalResult = await auth(callbackProvider, {
+      serverUrl: harness.upstream.mcpUrl,
+      authorizationCode: code,
+    });
+    expect(finalResult).toBe("AUTHORIZED");
+    expect(harness.tokenStore.get("disk")?.tokens?.access_token).toBeDefined();
+  });
+
   test("DCR registration persists across store instances (same issuer -> single register)", async () => {
     const baseUrl = "http://localhost:9876";
     await completeAuthFlow(harness, {
