@@ -15,8 +15,13 @@ export interface PendingFlow {
   state: string;
   /** Backend server name (e.g. "disk"). */
   serverName: string;
-  /** Session that initiated the flow, for notifications. "system" for /connect/:server. */
-  sessionId: string;
+  /**
+   * Sessions waiting on this flow's outcome. The set grows when single-
+   * flight dedupe reuses an in-flight flow for a second caller — both
+   * callers must be notified when the callback completes, or the later
+   * caller's session would hang.
+   */
+  sessionIds: Set<string>;
   /** Normalized authorization-server issuer URL (for DCR key lookup). */
   issuerUrl: string;
   /** Full authorization URL the user agent needs to visit. */
@@ -69,7 +74,12 @@ export class PendingFlowRegistry {
   }
 
   public register(flow: Omit<PendingFlow, "createdAt">): PendingFlow {
-    const stored: PendingFlow = { ...flow, createdAt: this.now() };
+    const stored: PendingFlow = {
+      ...flow,
+      // Defensive copy so the caller can't mutate the registry's internal set.
+      sessionIds: new Set(flow.sessionIds),
+      createdAt: this.now(),
+    };
 
     // If a flow was already pending for this server, evict it — we're
     // starting a new one from the same server. The older one can still
@@ -87,8 +97,22 @@ export class PendingFlowRegistry {
     this.logger?.debug("pending_flow_registered", {
       serverName: flow.serverName,
       state: flow.state,
+      sessionCount: stored.sessionIds.size,
     });
     return stored;
+  }
+
+  /**
+   * Attach an additional session subscriber to an in-flight flow. Used by
+   * single-flight dedupe in redirectToAuthorization: when caller B reuses
+   * caller A's pending authorize URL, caller B's session must also be
+   * notified when the callback completes.
+   */
+  public addSubscriber(serverName: string, sessionId: string): boolean {
+    const flow = this.findByServer(serverName);
+    if (!flow) return false;
+    flow.sessionIds.add(sessionId);
+    return true;
   }
 
   public findByServer(serverName: string): PendingFlow | undefined {

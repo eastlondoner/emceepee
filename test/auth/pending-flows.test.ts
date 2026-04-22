@@ -17,7 +17,7 @@ describe("PendingFlowRegistry", () => {
     const flow = registry.register({
       state: "s1",
       serverName: "disk",
-      sessionId: "sess1",
+      sessionIds: new Set(["sess1"]),
       issuerUrl: "https://issuer.example",
       authorizationUrl: "https://issuer.example/auth?state=s1",
       codeVerifier: "v1",
@@ -32,7 +32,7 @@ describe("PendingFlowRegistry", () => {
     registry.register({
       state: "s1",
       serverName: "disk",
-      sessionId: "sess1",
+      sessionIds: new Set(["sess1"]),
       issuerUrl: "https://issuer.example",
       authorizationUrl: "https://issuer.example/auth",
       codeVerifier: "v1",
@@ -49,7 +49,7 @@ describe("PendingFlowRegistry", () => {
     registry.register({
       state: "s1",
       serverName: "disk",
-      sessionId: "sess1",
+      sessionIds: new Set(["sess1"]),
       issuerUrl: "https://issuer.example",
       authorizationUrl: "u1",
       codeVerifier: "v1",
@@ -57,7 +57,7 @@ describe("PendingFlowRegistry", () => {
     registry.register({
       state: "s2",
       serverName: "disk",
-      sessionId: "sess1",
+      sessionIds: new Set(["sess1"]),
       issuerUrl: "https://issuer.example",
       authorizationUrl: "u2",
       codeVerifier: "v2",
@@ -72,7 +72,7 @@ describe("PendingFlowRegistry", () => {
     registry.register({
       state: "s1",
       serverName: "disk",
-      sessionId: "sess1",
+      sessionIds: new Set(["sess1"]),
       issuerUrl: "https://issuer.example",
       authorizationUrl: "u1",
       codeVerifier: "v1",
@@ -82,7 +82,7 @@ describe("PendingFlowRegistry", () => {
     registry.register({
       state: "s2",
       serverName: "disk",
-      sessionId: "sess1",
+      sessionIds: new Set(["sess1"]),
       issuerUrl: "https://issuer.example",
       authorizationUrl: "u2",
       codeVerifier: "v2",
@@ -93,12 +93,35 @@ describe("PendingFlowRegistry", () => {
     registry.shutdown();
   });
 
+  test("addSubscriber appends to an in-flight flow", () => {
+    const { registry } = make();
+    registry.register({
+      state: "s1",
+      serverName: "disk",
+      sessionIds: new Set(["sess1"]),
+      issuerUrl: "https://issuer.example",
+      authorizationUrl: "u1",
+      codeVerifier: "v1",
+    });
+    expect(registry.addSubscriber("disk", "sess2")).toBe(true);
+    const flow = registry.findByServer("disk");
+    expect(flow?.sessionIds.size).toBe(2);
+    expect(flow?.sessionIds.has("sess1")).toBe(true);
+    expect(flow?.sessionIds.has("sess2")).toBe(true);
+    // Idempotent: adding the same subscriber again doesn't grow the set.
+    registry.addSubscriber("disk", "sess2");
+    expect(flow?.sessionIds.size).toBe(2);
+    // Returns false for unknown servers.
+    expect(registry.addSubscriber("unknown", "sess3")).toBe(false);
+    registry.shutdown();
+  });
+
   test("shutdown clears state and stops sweeper", () => {
     const { registry } = make();
     registry.register({
       state: "s1",
       serverName: "disk",
-      sessionId: "sess1",
+      sessionIds: new Set(["sess1"]),
       issuerUrl: "https://issuer.example",
       authorizationUrl: "u1",
       codeVerifier: "v1",

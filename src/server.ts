@@ -1991,11 +1991,16 @@ function main(): void {
       return;
     }
 
+    // The sessionId on this provider only matters if redirectToAuthorization
+    // is called during the callback (it shouldn't be — this is the
+    // authorization_code exchange path, not a fresh auth). Using any
+    // subscriber from the original flow is fine.
+    const initiatingSessionId = flow.sessionIds.values().next().value ?? "system:/callback";
     const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
       serverName: flow.serverName,
       serverUrl: serverConfig.url,
       redirectUri: oauthRedirectUri,
-      sessionId: flow.sessionId,
+      sessionId: initiatingSessionId,
       tokenStore,
       dcrStore,
       pendingFlows,
@@ -2045,35 +2050,42 @@ function main(): void {
     status: "completed" | "failed",
     errorMessage?: string
   ): void {
-    const session = sessionManager.getSession(flow.sessionId);
-    if (session) {
-      session.eventSystem.addEvent("elicitation_completed", flow.serverName, {
-        server: flow.serverName,
-        status,
-        error: errorMessage,
-      });
+    const params: Record<string, unknown> = {
+      server: flow.serverName,
+      status,
+    };
+    if (errorMessage !== undefined) {
+      params["error"] = errorMessage;
     }
-    const transport = sessionToTransport.get(flow.sessionId);
-    if (transport) {
-      const params: Record<string, unknown> = {
-        server: flow.serverName,
-        status,
-      };
-      if (errorMessage !== undefined) {
-        params["error"] = errorMessage;
-      }
-      void transport
-        .send({
-          jsonrpc: "2.0",
-          method: "notifications/elicitation/complete",
-          params,
-        })
-        .catch((err: unknown) => {
-          logger.debug("elicitation_notification_send_failed", {
-            sessionId: flow.sessionId,
-            error: err instanceof Error ? err.message : String(err),
-          });
+
+    // Broadcast to every session that was subscribed to this flow.
+    // Single-flight dedupe attaches additional sessionIds to a flow when a
+    // concurrent caller reuses the in-flight authorize URL; all of them
+    // must be notified or the later caller hangs on await_activity.
+    for (const sid of flow.sessionIds) {
+      const session = sessionManager.getSession(sid);
+      if (session) {
+        session.eventSystem.addEvent("elicitation_completed", flow.serverName, {
+          server: flow.serverName,
+          status,
+          error: errorMessage,
         });
+      }
+      const transport = sessionToTransport.get(sid);
+      if (transport) {
+        void transport
+          .send({
+            jsonrpc: "2.0",
+            method: "notifications/elicitation/complete",
+            params,
+          })
+          .catch((err: unknown) => {
+            logger.debug("elicitation_notification_send_failed", {
+              sessionId: sid,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      }
     }
   }
 

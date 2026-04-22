@@ -220,20 +220,33 @@ export function makeOAuthClientProvider(
     redirectToAuthorization(authorizationUrl: URL): void {
       // Single-flight: if a flow is already pending for this server, reuse
       // its URL — both concurrent callers see the same authorize URL.
+      // Subscribe our sessionId so the callback handler broadcasts the
+      // completion to both the original initiator and this caller.
       const existing = pendingFlows.findByServer(serverName);
       if (existing) {
+        pendingFlows.addSubscriber(serverName, sessionId);
         provider.onAuthorizationRequired?.(existing.authorizationUrl);
         return;
       }
 
       const issuer = cachedIssuer ?? normalizeIssuer(serverUrl);
       const stateParam = authorizationUrl.searchParams.get("state") ?? "";
-      const verifier = tokenStore.get(serverName)?.codeVerifier ?? "";
+      const verifier = tokenStore.get(serverName)?.codeVerifier;
+      if (!verifier) {
+        // The SDK calls saveCodeVerifier immediately before
+        // redirectToAuthorization; reaching this branch means the store was
+        // cleared mid-flight (or something went badly wrong). Fail loudly
+        // rather than persisting an empty verifier that would silently
+        // break the PKCE exchange at /oauth/callback.
+        throw new Error(
+          `redirectToAuthorization: no PKCE code verifier stored for '${serverName}'`
+        );
+      }
 
       pendingFlows.register({
         state: stateParam,
         serverName,
-        sessionId,
+        sessionIds: new Set([sessionId]),
         issuerUrl: issuer,
         authorizationUrl: authorizationUrl.toString(),
         codeVerifier: verifier,

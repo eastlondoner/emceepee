@@ -31,3 +31,14 @@ export {
   classifyElicitation,
   type ElicitationMode,
 } from "./client-facing/capabilities.js";
+export {
+  EphemeralCallbackListener,
+  type EphemeralCallbackResult,
+  type EphemeralCallbackListenerOptions,
+} from "./backend/ephemeral-listener.js";
+export {
+  runStdioOAuthFlow,
+  type StdioOAuthFlowOptions,
+  type StdioOAuthFlowStarted,
+  type StdioOAuthFlowResult,
+} from "./backend/stdio-oauth-flow.js";

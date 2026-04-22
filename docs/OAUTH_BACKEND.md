@@ -20,9 +20,14 @@ This document explains the intended flow and the security posture.
   (override via `EMCEEPEE_DCR_STORE_PATH`), keyed by authorization-server
   issuer URL. This avoids re-registering on every restart. The file is
   written atomically with mode 0600.
-- **stdio mode does not support OAuth upstreams.** There is no HTTP surface
-  for the OAuth callback. `add_server` with `authMode: "oauth"` in stdio
-  mode returns an error telling you to use `emceepee-http` instead.
+- **stdio mode uses a per-flow ephemeral loopback listener.** When you
+  call `add_server` with `authMode: "oauth"` in stdio mode, emceepee
+  opens a one-shot HTTP listener on `127.0.0.1:<random-port>`, uses
+  that as the `redirect_uri`, returns the authorize URL in the tool
+  response, and tears the listener down as soon as the callback lands
+  (or after a 10-minute timeout). Tokens land in the shared
+  `BackendTokenStore`, so subsequent tool calls on the server connect
+  silently.
 
 ## Registering an OAuth upstream
 
@@ -35,6 +40,21 @@ From any connected MCP client, call the `add_server` tool:
   "authMode": "oauth"
 }
 ```
+
+### stdio mode
+
+`add_server` starts an ephemeral loopback listener (random port on
+127.0.0.1), runs the OAuth flow, and returns the authorize URL in the
+tool response. The user opens that URL in their browser; the listener
+catches the callback, exchanges the code for tokens, and closes. Then
+any tool call on the server connects with the cached bearer. The
+listener times out after 10 minutes if no callback arrives.
+
+If the refresh token later becomes invalid, tool calls will return an
+`authorization required` error — run `add_server` again to trigger a
+fresh flow.
+
+### emceepee-http mode
 
 The first time a tool call hits that upstream (`execute_tool`, `read_resource`,
 etc.), emceepee:
@@ -102,6 +122,7 @@ See `.env.example` for the full list:
 | `EMCEEPEE_HOST` | 127.0.0.1 | Bind address. Non-loopback binds print a warning. |
 | `EMCEEPEE_BASE_URL` | `http://localhost:${PORT}` | Public URL for OAuth redirect + `/connect` links |
 | `EMCEEPEE_DCR_STORE_PATH` | `~/.emceepee/dcr-clients.json` | Where DCR registrations are persisted |
+| `EMCEEPEE_STDIO_OAUTH_PORT` | 14500 | Placeholder port for stdio mode's session-manager provider. Not the listener port (listeners use kernel-assigned random ports). |
 
 ## Security posture
 
