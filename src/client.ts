@@ -318,8 +318,14 @@ export class MCPHttpClient {
         this.handleUnexpectedDisconnect();
       };
 
-      // Connect and initialize
-      await this.client.connect(this.transport);
+      // Connect and initialize. Wrap in runAuthed so a 401 during
+      // initialize (on an OAuth-protected upstream with missing/expired
+      // tokens) surfaces as BackendAuthRequiredError carrying the
+      // authorize URL the SDK registered via redirectToAuthorization —
+      // the tool handler then turns that into an elicitation.
+      const client = this.client;
+      const transport = this.transport;
+      await this.runAuthed(() => client.connect(transport));
 
       // Get server capabilities
       const serverCapabilities = this.client.getServerCapabilities();
@@ -812,8 +818,13 @@ export class MCPHttpClient {
         this.handleUnexpectedDisconnect();
       };
 
-      // Connect and initialize
-      await this.client.connect(this.transport);
+      // Connect and initialize. Wrap in runAuthed — same rationale as
+      // in connect() above: surface a 401 as BackendAuthRequiredError.
+      {
+        const client = this.client;
+        const transport = this.transport;
+        await this.runAuthed(() => client.connect(transport));
+      }
 
       // Get server capabilities
       const serverCapabilities = this.client.getServerCapabilities();

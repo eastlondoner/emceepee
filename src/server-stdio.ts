@@ -28,6 +28,7 @@ import { BackendTokenStore } from "./auth/backend/token-store.js";
 import { FileDcrStore } from "./auth/backend/dcr-store.js";
 import { PendingFlowRegistry } from "./auth/backend/pending-flows.js";
 import { runStdioOAuthFlow } from "./auth/backend/stdio-oauth-flow.js";
+import { BackendAuthRequiredError } from "./auth/backend/errors.js";
 
 // Codemode imports
 import {
@@ -474,6 +475,38 @@ function registerTools(
           session
         );
       } catch (err) {
+        // If the upstream 401s during initialize (cached tokens stale,
+        // refresh failed), run a fresh ephemeral flow instead of surfacing
+        // a dead-URL elicitation from the session-manager's stub baseUrl.
+        if (err instanceof BackendAuthRequiredError && url && authMode === "oauth") {
+          tokenStore.clearTokens(name);
+          try {
+            const flow = await runStdioOAuthFlow({
+              serverName: name,
+              serverUrl: url,
+              tokenStore,
+              dcrStore,
+              ...(oauthScopes ? { scopes: oauthScopes } : {}),
+              logger,
+            });
+            if (flow.status === "redirect" && flow.authorizationUrl) {
+              void flow.completion.then((result) => {
+                if (result.status === "failed") {
+                  logger.warn("stdio_oauth_reauth_failed", { name, error: result.error });
+                }
+              });
+              return toolSuccess(
+                `'${name}' needs re-authorization.\n\n` +
+                  `Open this URL in your browser:\n${flow.authorizationUrl}\n\n` +
+                  `After authorizing, call any tool on '${name}' to complete the connection.`,
+                session
+              );
+            }
+          } catch (reauthErr) {
+            const rm = reauthErr instanceof Error ? reauthErr.message : String(reauthErr);
+            return toolError(`Re-authorization failed: ${rm}`);
+          }
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to add server: ${message}`);
       }

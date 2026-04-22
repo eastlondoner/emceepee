@@ -385,6 +385,11 @@ function registerTools(
           session
         );
       } catch (err) {
+        // OAuth upstream whose initialize returned 401: surface the
+        // elicitation so the client can open the authorize URL.
+        if (err instanceof BackendAuthRequiredError) {
+          return handleBackendAuthRequired(err, session);
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to add server: ${message}`);
       }

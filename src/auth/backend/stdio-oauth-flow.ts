@@ -24,7 +24,6 @@
  */
 
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { URL } from "node:url";
 import type { StructuredLogger } from "../../logging.js";
 import type { BackendTokenStore } from "./token-store.js";
 import type { DcrStore } from "./dcr-store.js";
@@ -205,24 +204,4 @@ export async function runStdioOAuthFlow(
       }),
     };
   }
-}
-
-/**
- * Rewrite a URL so its OAuth `redirect_uri` and `state` query parameters
- * reflect a fresh ephemeral listener — used nowhere in production, exposed
- * for tests that want to drive the authorize URL directly without a
- * real browser.
- */
-export function _rewriteAuthUrlForTest(
-  authorizationUrl: string,
-  replacements: { redirectUri?: string; state?: string }
-): string {
-  const u = new URL(authorizationUrl);
-  if (replacements.redirectUri !== undefined) {
-    u.searchParams.set("redirect_uri", replacements.redirectUri);
-  }
-  if (replacements.state !== undefined) {
-    u.searchParams.set("state", replacements.state);
-  }
-  return u.toString();
 }

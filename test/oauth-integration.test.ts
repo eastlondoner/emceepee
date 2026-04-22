@@ -16,6 +16,8 @@ import { join } from "node:path";
 
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 
+import { MCPHttpClient } from "../src/client.js";
+import { BackendAuthRequiredError } from "../src/auth/backend/errors.js";
 import { BackendTokenStore } from "../src/auth/backend/token-store.js";
 import { FileDcrStore } from "../src/auth/backend/dcr-store.js";
 import { PendingFlowRegistry } from "../src/auth/backend/pending-flows.js";
@@ -192,6 +194,46 @@ describe("OAuth backend integration", () => {
     expect(result).toBe("AUTHORIZED");
     expect(harness.upstream.stats.authorizeCalls).toBe(authorizeCountBefore);
     expect(harness.upstream.stats.dcrRegistrations).toBe(dcrCountBefore);
+  });
+
+  test("MCPHttpClient.connect() translates 401 on initialize to BackendAuthRequiredError", async () => {
+    // Regression for Bugbot #7 — the SDK's auth() runs during
+    // client.connect() when initialize returns 401, registers the
+    // authorize URL via redirectToAuthorization, and throws
+    // UnauthorizedError. MCPHttpClient must translate that into a
+    // BackendAuthRequiredError carrying the URL so the tool handler can
+    // turn it into an elicitation.
+    const baseUrl = "http://localhost:9876";
+    const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
+      serverName: "disk",
+      serverUrl: harness.upstream.mcpUrl,
+      redirectUri: `${baseUrl}/oauth/callback`,
+      sessionId: "sess-X",
+      tokenStore: harness.tokenStore,
+      dcrStore: harness.dcrStore,
+      pendingFlows: harness.pendingFlows,
+    };
+    const provider = makeOAuthClientProvider(providerOpts);
+    await provider.ensureIssuer();
+
+    const client = new MCPHttpClient({
+      name: "disk",
+      url: harness.upstream.mcpUrl,
+      authMode: "oauth",
+      authProvider: provider,
+    });
+
+    let caught: unknown;
+    try {
+      await client.connect();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BackendAuthRequiredError);
+    if (caught instanceof BackendAuthRequiredError) {
+      expect(caught.serverName).toBe("disk");
+      expect(caught.authorizationUrl).toContain("/authorize");
+    }
   });
 
   test("concurrent single-flight: callback's pinned verifier beats stomped token-store value", async () => {
