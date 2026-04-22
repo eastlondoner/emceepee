@@ -21,6 +21,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { renderHtmlPage } from "../html-util.js";
 
 export interface EphemeralCallbackResult {
   /** Authorization code, when the AS returned success. */
@@ -188,7 +189,7 @@ export class EphemeralCallbackListener {
 
     if (error) {
       res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(htmlPage("Authorization failed", error, errorDescription));
+      res.end(renderHtmlPage("Authorization failed", error, errorDescription));
       this.complete({ error, errorDescription, state });
       return;
     }
@@ -201,10 +202,9 @@ export class EphemeralCallbackListener {
 
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(
-      htmlPage(
+      renderHtmlPage(
         "Connected",
-        "You can close this tab and return to your MCP client.",
-        undefined
+        "You can close this tab and return to your MCP client."
       )
     );
     this.complete({ code, state });
@@ -219,24 +219,4 @@ export class EphemeralCallbackListener {
     }
     this.resolveResult(r);
   }
-}
-
-function htmlPage(title: string, message: string, detail: string | undefined): string {
-  const esc = (s: string): string =>
-    s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  const body =
-    `<h1>${esc(title)}</h1>` +
-    `<p>${esc(message)}</p>` +
-    (detail ? `<pre>${esc(detail)}</pre>` : "");
-  return (
-    `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>` +
-    `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;color:#222}` +
-    `h1{margin-bottom:.5rem}pre{background:#f5f5f7;padding:1rem;border-radius:6px;overflow-x:auto}</style></head>` +
-    `<body>${body}</body></html>`
-  );
 }

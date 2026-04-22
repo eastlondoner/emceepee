@@ -342,6 +342,54 @@ function registerTools(
 ): void {
   const { codemodeEnabled = true } = options;
   const { tokenStore, dcrStore, logger } = oauthCtx;
+
+  /**
+   * Turn a BackendAuthRequiredError raised inside a stdio tool handler
+   * into a tool response that kicks off a fresh runStdioOAuthFlow and
+   * asks the user to open the new authorize URL. Returns undefined if
+   * we can't run the flow (e.g. the upstream isn't OAuth-mode) — caller
+   * should fall through to its own generic error handling.
+   */
+  async function handleStdioAuthRequired(
+    err: BackendAuthRequiredError,
+    session: SessionState
+  ): Promise<ToolResponse | undefined> {
+    const cfg = sessionManager.getServerConfigs().getConfig(err.serverName);
+    if (cfg?.type !== "http" || cfg.authMode !== "oauth") {
+      return undefined;
+    }
+    tokenStore.clearTokens(err.serverName);
+    try {
+      const flow = await runStdioOAuthFlow({
+        serverName: err.serverName,
+        serverUrl: cfg.url,
+        tokenStore,
+        dcrStore,
+        ...(cfg.oauthScopes ? { scopes: cfg.oauthScopes } : {}),
+        logger,
+      });
+      if (flow.status === "redirect" && flow.authorizationUrl) {
+        void flow.completion.then((result) => {
+          if (result.status === "failed") {
+            logger.warn("stdio_oauth_tool_reauth_failed", {
+              name: err.serverName,
+              error: result.error,
+            });
+          }
+        });
+        return toolSuccess(
+          `'${err.serverName}' needs authorization.\n\n` +
+            `Open this URL in your browser:\n${flow.authorizationUrl}\n\n` +
+            `After authorizing, retry this tool.`,
+          session
+        );
+      }
+      return undefined;
+    } catch (flowErr) {
+      const m = flowErr instanceof Error ? flowErr.message : String(flowErr);
+      return toolError(`OAuth flow failed: ${m}`);
+    }
+  }
   // ---------------------------------------------------------------------------
   // Server Management Tools
   // ---------------------------------------------------------------------------
@@ -670,6 +718,10 @@ function registerTools(
           isError: result.isError,
         };
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          const reauth = await handleStdioAuthRequired(err, session);
+          if (reauth) return reauth;
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to execute tool: ${message}`);
       }
@@ -829,6 +881,10 @@ function registerTools(
 
         return toolJson({ contents }, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          const reauth = await handleStdioAuthRequired(err, session);
+          if (reauth) return reauth;
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to read resource: ${message}`);
       }
@@ -917,6 +973,10 @@ function registerTools(
         const result = await client.getPrompt(name, promptArgs ?? {});
         return toolJson(result, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          const reauth = await handleStdioAuthRequired(err, session);
+          if (reauth) return reauth;
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to get prompt: ${message}`);
       }
@@ -1670,7 +1730,7 @@ async function main(): Promise<void> {
           if (server.authMode === "oauth") {
             logger.info("oauth_server_registered_no_preauth", {
               name: server.name,
-              hint: "Call add_server or any tool on this server to trigger the OAuth flow.",
+              hint: "Call add_server (or any tool on this server) to trigger the OAuth flow — the tool handler surfaces an authorize URL in its response.",
             });
           }
         } else if (isStdioServerConfig(server)) {
@@ -1712,7 +1772,7 @@ async function main(): Promise<void> {
           if (server.authMode === "oauth") {
             logger.info("oauth_server_registered_no_preauth", {
               name: server.name,
-              hint: "Call add_server or any tool on this server to trigger the OAuth flow.",
+              hint: "Call add_server (or any tool on this server) to trigger the OAuth flow — the tool handler surfaces an authorize URL in its response.",
             });
           }
         } else if (isStdioServerConfig(server)) {

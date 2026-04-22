@@ -109,13 +109,14 @@ async function completeAuthFlow(
   expect(flow).toBeDefined();
   expect(flow?.serverName).toBe(opts.serverName);
 
-  // Simulate the callback handler: rebuild provider with the flow's sessionId
-  // and finish the auth.
+  // Simulate the callback handler: rebuild provider using a subscriber
+  // from the flow's sessionIds set (matches server.ts's callback logic).
+  const flowSessionId = flow?.sessionIds.values().next().value ?? opts.sessionId;
   const finishProviderOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
     serverName: opts.serverName,
     serverUrl: opts.serverUrl,
     redirectUri: opts.redirectUri,
-    sessionId: flow?.sessionId ?? opts.sessionId,
+    sessionId: flowSessionId,
     tokenStore: h.tokenStore,
     dcrStore: h.dcrStore,
     pendingFlows: h.pendingFlows,
@@ -297,11 +298,16 @@ describe("OAuth backend integration", () => {
     expect(flow).toBeDefined();
     if (!flow) throw new Error("flow disappeared");
 
+    // Both caller-A (sess-A) and caller-B (sess-B) should be in the
+    // flow's sessionIds set — this is single-flight's core contract.
+    expect(flow.sessionIds.has("sess-A")).toBe(true);
+    expect(flow.sessionIds.has("sess-B")).toBe(true);
+
     const callbackOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
       serverName: "disk",
       serverUrl: harness.upstream.mcpUrl,
       redirectUri: `${baseUrl}/oauth/callback`,
-      sessionId: flow.sessionId,
+      sessionId: flow.sessionIds.values().next().value ?? "sess-A",
       tokenStore: harness.tokenStore,
       dcrStore: harness.dcrStore,
       pendingFlows: harness.pendingFlows,

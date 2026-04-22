@@ -32,6 +32,7 @@ import { SSEEventStore } from "./session/sse-event-store.js";
 import type { ProxyConfig } from "./types.js";
 import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import { BackendAuthRequiredError } from "./auth/backend/errors.js";
+import { escapeHtml, renderHtmlPage } from "./auth/html-util.js";
 import { BackendTokenStore } from "./auth/backend/token-store.js";
 import { FileDcrStore } from "./auth/backend/dcr-store.js";
 import { PendingFlowRegistry, type PendingFlow } from "./auth/backend/pending-flows.js";
@@ -111,15 +112,6 @@ function parseArgs(): CliArgs {
 function loadConfig(path: string): ProxyConfig {
   const content = readFileSync(path, "utf-8");
   return JSON.parse(content) as ProxyConfig;
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 // =============================================================================
@@ -1834,28 +1826,26 @@ function main(): void {
           : detail === undefined || detail === null
             ? ""
             : JSON.stringify(detail);
-    const body =
-      `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
-      `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;color:#222}` +
-      `h1{margin-bottom:.5rem}pre{background:#f5f5f7;padding:1rem;border-radius:6px;overflow-x:auto}</style></head>` +
-      `<body><h1>${escapeHtml(title)}</h1>` +
-      (message ? `<pre>${escapeHtml(message)}</pre>` : "") +
-      `</body></html>`;
     res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(body);
+    res.end(renderHtmlPage(title, "", message || undefined));
   }
 
+  /**
+   * Render a success page. `bodyHtml` is RAW HTML (contains already-
+   * escaped content the caller controls) — it's appended as-is after
+   * the title. Use only with trusted, caller-constructed markup.
+   */
   function sendHtmlOk(
     res: ServerResponse,
     title: string,
-    body: string
+    bodyHtml: string
   ): void {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(
       `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
         `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;color:#222}` +
         `h1{margin-bottom:.5rem}</style></head>` +
-        `<body><h1>${escapeHtml(title)}</h1>${body}</body></html>`
+        `<body><h1>${escapeHtml(title)}</h1>${bodyHtml}</body></html>`
     );
   }
 
