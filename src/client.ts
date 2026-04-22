@@ -112,8 +112,6 @@ export class MCPHttpClient {
   private readonly headers: Record<string, string> | undefined;
   private readonly authMode: "none" | "oauth";
   private readonly authProvider: EmceepeeOAuthClientProvider | undefined;
-  /** Captured during `redirectToAuthorization` so runAuthed can re-throw BackendAuthRequiredError with it. */
-  private lastAuthorizationUrl: string | undefined;
   private readonly onStatusChange:
     | ((status: BackendServerStatus, error?: string) => void)
     | undefined;
@@ -161,11 +159,10 @@ export class MCPHttpClient {
     this.authProvider = options.authProvider;
     // headers are ignored entirely in OAuth mode — the transport uses the provider.
     this.headers = this.authMode === "oauth" ? undefined : options.headers;
-    if (this.authProvider) {
-      this.authProvider.onAuthorizationRequired = (url: string): void => {
-        this.lastAuthorizationUrl = url;
-      };
-    }
+    // Do NOT install onAuthorizationRequired here: it's a single-slot
+    // callback and would race with concurrent runAuthed() invocations.
+    // Instead, runAuthed() reads the authorize URL directly from the
+    // provider's pending-flow-backed getter on failure.
     this.onStatusChange = options.onStatusChange;
     this.onNotification = options.onNotification;
     this.onLog = options.onLog;
@@ -440,27 +437,22 @@ export class MCPHttpClient {
    * carrying the authorization URL the SDK just registered via our provider.
    */
   private async runAuthed<T>(fn: () => Promise<T>): Promise<T> {
-    // Reset so we pick up only the URL produced by THIS call (if any).
-    // The OAuth provider's redirectToAuthorization (invoked from within the
-    // SDK during fn()) may repopulate this field via its callback. TS's flow
-    // analysis doesn't trust callback-driven mutation, so we read the current
-    // value via `getCurrentAuthorizationUrl()` to avoid false-positive narrowing.
-    this.lastAuthorizationUrl = undefined;
     try {
       return await fn();
     } catch (err) {
       if (err instanceof UnauthorizedError && this.authMode === "oauth") {
-        const url = this.getCurrentAuthorizationUrl();
+        // Read the authorize URL from the provider's pending-flow-backed
+        // getter. This is safe under concurrent runAuthed() calls because
+        // PendingFlowRegistry is the single source of truth keyed by server
+        // name, and single-flight dedupe guarantees both callers see the
+        // same URL.
+        const url = this.authProvider?.getCurrentAuthorizationUrl();
         if (url) {
           throw new BackendAuthRequiredError(this.name, url);
         }
       }
       throw err;
     }
-  }
-
-  private getCurrentAuthorizationUrl(): string | undefined {
-    return this.lastAuthorizationUrl;
   }
 
   /**

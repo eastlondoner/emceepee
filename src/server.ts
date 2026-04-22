@@ -1710,8 +1710,10 @@ function main(): void {
   const logger = createConsoleLogger(logLevel);
 
   const host = process.env["EMCEEPEE_HOST"] ?? "127.0.0.1";
-  const baseUrl =
-    process.env["EMCEEPEE_BASE_URL"] ?? `http://localhost:${String(port)}`;
+  const baseUrl = (
+    process.env["EMCEEPEE_BASE_URL"] ?? `http://localhost:${String(port)}`
+  ).replace(/\/+$/, "");
+  const oauthRedirectUri = `${baseUrl}/oauth/callback`;
   const dcrStorePath = process.env["EMCEEPEE_DCR_STORE_PATH"];
 
   const isLoopbackHost =
@@ -1897,7 +1899,7 @@ function main(): void {
     const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
       serverName,
       serverUrl: serverConfig.url,
-      baseUrl,
+      redirectUri: oauthRedirectUri,
       sessionId: "system:/connect",
       tokenStore,
       dcrStore,
@@ -1992,7 +1994,7 @@ function main(): void {
     const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
       serverName: flow.serverName,
       serverUrl: serverConfig.url,
-      baseUrl,
+      redirectUri: oauthRedirectUri,
       sessionId: flow.sessionId,
       tokenStore,
       dcrStore,
@@ -2007,9 +2009,9 @@ function main(): void {
     };
     if (serverConfig.oauthScopes) providerOpts.scopes = serverConfig.oauthScopes;
     const provider = makeOAuthClientProvider(providerOpts);
-    await provider.ensureIssuer();
 
     try {
+      await provider.ensureIssuer();
       const result = await auth(provider, {
         serverUrl: serverConfig.url,
         authorizationCode: code,

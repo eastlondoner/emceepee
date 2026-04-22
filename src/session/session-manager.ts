@@ -33,6 +33,10 @@ import type { DcrStore } from "../auth/backend/dcr-store.js";
 import type { PendingFlowRegistry } from "../auth/backend/pending-flows.js";
 import { makeOAuthClientProvider } from "../auth/backend/oauth-provider.js";
 
+function trimTrailingSlash(u: string): string {
+  return u.endsWith("/") ? u.slice(0, -1) : u;
+}
+
 /**
  * Configuration for SessionManager
  */
@@ -631,7 +635,7 @@ export class SessionManager {
     const options: Parameters<typeof makeOAuthClientProvider>[0] = {
       serverName: serverConfig.name,
       serverUrl: serverConfig.url,
-      baseUrl: this.baseUrl,
+      redirectUri: `${trimTrailingSlash(this.baseUrl)}/oauth/callback`,
       sessionId: session.sessionId,
       tokenStore: this.tokenStore,
       dcrStore: this.dcrStore,

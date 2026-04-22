@@ -27,8 +27,16 @@ export interface MakeOAuthClientProviderOptions {
   serverName: string;
   /** Upstream MCP server URL (e.g. "https://disk.yo-mcp.com/mcp"). */
   serverUrl: string;
-  /** emceepee-http base URL (e.g. "http://localhost:8080"). Callback lives at `${baseUrl}/oauth/callback`. */
-  baseUrl: string;
+  /**
+   * The full `redirect_uri` emceepee advertises to the authorization server.
+   *
+   * - emceepee-http: `${EMCEEPEE_BASE_URL}/oauth/callback` (a fixed path
+   *   served by the long-running HTTP server).
+   * - emceepee-stdio: `http://127.0.0.1:${port}/oauth/callback` where
+   *   `port` comes from the ephemeral callback listener started for this
+   *   specific flow.
+   */
+  redirectUri: string;
   /** Optional OAuth scopes. */
   scopes?: string[];
   /** Session ID that initiated the flow (for `/oauth/callback` → notification correlation). */
@@ -57,9 +65,17 @@ export interface EmceepeeOAuthClientProvider extends OAuthClientProvider {
   /** Resolve + cache the issuer URL for this backend. Idempotent. */
   ensureIssuer(): Promise<string>;
   /**
-   * The client (MCPHttpClient) sets this after construction so that the
-   * auth URL we produce during `auth()` can be captured and re-thrown in a
-   * BackendAuthRequiredError.
+   * Returns the currently-registered authorization URL for this backend, if
+   * any. Backed by the PendingFlowRegistry so concurrent callers reading
+   * this during their `catch (UnauthorizedError)` handling see the same
+   * stable value, regardless of ordering — no per-client mutable state.
+   */
+  getCurrentAuthorizationUrl(): string | undefined;
+  /**
+   * Optional hook used by /connect/:server to turn
+   * `redirectToAuthorization(url)` into a 302 response. emceepee-http's
+   * `/connect` handler installs one; MCPHttpClient does not (it reads the
+   * URL from `getCurrentAuthorizationUrl()` after UnauthorizedError instead).
    */
   onAuthorizationRequired?: (url: string) => void;
 }
@@ -73,7 +89,7 @@ export function makeOAuthClientProvider(
   const {
     serverName,
     serverUrl,
-    baseUrl,
+    redirectUri,
     scopes,
     sessionId,
     tokenStore,
@@ -82,8 +98,6 @@ export function makeOAuthClientProvider(
     logger,
     pinnedCodeVerifier,
   } = options;
-
-  const redirectUri = `${trimTrailingSlash(baseUrl)}/oauth/callback`;
 
   const clientMetadata: OAuthClientMetadata = {
     redirect_uris: [redirectUri],
@@ -145,6 +159,10 @@ export function makeOAuthClientProvider(
 
     async ensureIssuer(): Promise<string> {
       return resolveIssuer();
+    },
+
+    getCurrentAuthorizationUrl(): string | undefined {
+      return pendingFlows.findByServer(serverName)?.authorizationUrl;
     },
 
     state(): string {
@@ -254,8 +272,4 @@ export function makeOAuthClientProvider(
   };
 
   return provider;
-}
-
-function trimTrailingSlash(u: string): string {
-  return u.endsWith("/") ? u.slice(0, -1) : u;
 }

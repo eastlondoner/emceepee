@@ -66,13 +66,13 @@ async function buildHarness(): Promise<Harness> {
  */
 async function completeAuthFlow(
   h: Harness,
-  opts: { serverName: string; serverUrl: string; baseUrl: string; sessionId: string }
+  opts: { serverName: string; serverUrl: string; redirectUri: string; sessionId: string }
 ): Promise<void> {
   const state = { authUrl: undefined as string | undefined };
   const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
     serverName: opts.serverName,
     serverUrl: opts.serverUrl,
-    baseUrl: opts.baseUrl,
+    redirectUri: opts.redirectUri,
     sessionId: opts.sessionId,
     tokenStore: h.tokenStore,
     dcrStore: h.dcrStore,
@@ -112,7 +112,7 @@ async function completeAuthFlow(
   const finishProviderOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
     serverName: opts.serverName,
     serverUrl: opts.serverUrl,
-    baseUrl: opts.baseUrl,
+    redirectUri: opts.redirectUri,
     sessionId: flow?.sessionId ?? opts.sessionId,
     tokenStore: h.tokenStore,
     dcrStore: h.dcrStore,
@@ -142,7 +142,7 @@ describe("OAuth backend integration", () => {
     await completeAuthFlow(harness, {
       serverName: "disk",
       serverUrl: harness.upstream.mcpUrl,
-      baseUrl,
+      redirectUri: `${baseUrl}/oauth/callback`,
       sessionId: "sess-1",
     });
     const tokens = harness.tokenStore.get("disk")?.tokens;
@@ -156,7 +156,7 @@ describe("OAuth backend integration", () => {
     await completeAuthFlow(harness, {
       serverName: "disk",
       serverUrl: harness.upstream.mcpUrl,
-      baseUrl,
+      redirectUri: `${baseUrl}/oauth/callback`,
       sessionId: "sess-1",
     });
 
@@ -180,7 +180,7 @@ describe("OAuth backend integration", () => {
     const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
       serverName: "disk",
       serverUrl: harness.upstream.mcpUrl,
-      baseUrl,
+      redirectUri: `${baseUrl}/oauth/callback`,
       sessionId: "sess-1",
       tokenStore: harness.tokenStore,
       dcrStore: harness.dcrStore,
@@ -210,7 +210,7 @@ describe("OAuth backend integration", () => {
       const opts: Parameters<typeof makeOAuthClientProvider>[0] = {
         serverName: "disk",
         serverUrl: harness.upstream.mcpUrl,
-        baseUrl,
+        redirectUri: `${baseUrl}/oauth/callback`,
         sessionId,
         tokenStore: harness.tokenStore,
         dcrStore: harness.dcrStore,
@@ -258,7 +258,7 @@ describe("OAuth backend integration", () => {
     const callbackOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
       serverName: "disk",
       serverUrl: harness.upstream.mcpUrl,
-      baseUrl,
+      redirectUri: `${baseUrl}/oauth/callback`,
       sessionId: flow.sessionId,
       tokenStore: harness.tokenStore,
       dcrStore: harness.dcrStore,
@@ -280,7 +280,7 @@ describe("OAuth backend integration", () => {
     await completeAuthFlow(harness, {
       serverName: "disk",
       serverUrl: harness.upstream.mcpUrl,
-      baseUrl,
+      redirectUri: `${baseUrl}/oauth/callback`,
       sessionId: "sess-1",
     });
     expect(harness.upstream.stats.dcrRegistrations).toBe(1);
@@ -299,7 +299,7 @@ describe("OAuth backend integration", () => {
       await completeAuthFlow(freshHarness, {
         serverName: "disk",
         serverUrl: harness.upstream.mcpUrl,
-        baseUrl,
+        redirectUri: `${baseUrl}/oauth/callback`,
         sessionId: "sess-2",
       });
       expect(harness.upstream.stats.dcrRegistrations).toBe(1);
