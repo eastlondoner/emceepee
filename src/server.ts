@@ -275,8 +275,6 @@ function toolJson(data: unknown, session?: SessionState): ToolResponse {
 interface RegisterToolsOptions {
   /** Enable codemode tools (codemode_search, codemode_execute). Default: true */
   codemodeEnabled?: boolean;
-  /** The McpServer — used to read client capabilities lazily. */
-  mcpServer?: McpServer;
 }
 
 /**
@@ -284,20 +282,16 @@ interface RegisterToolsOptions {
  * error (for clients that advertise URL elicitation) or a plaintext fallback
  * tool result (for clients that don't).
  *
- * Lazily populates `session.clientCapabilities` the first time we need them.
+ * Reads capabilities only from the session's own record — populated when the
+ * session's initialize request was sniffed on its transport. Do NOT fall back
+ * to the shared McpServer's getClientCapabilities(): that field is overwritten
+ * by every initialize from any transport and would leak between sessions.
  */
 function handleBackendAuthRequired(
   err: BackendAuthRequiredError,
-  session: SessionState,
-  mcpServer: McpServer | undefined
+  session: SessionState
 ): ToolResponse {
-  let caps: ClientCapabilities | undefined = session.clientCapabilities;
-  if (caps === undefined && mcpServer) {
-    caps = mcpServer.server.getClientCapabilities() ?? undefined;
-    session.clientCapabilities = caps;
-  }
-
-  const payload = buildAuthElicitation(caps, err);
+  const payload = buildAuthElicitation(session.clientCapabilities, err);
   if (payload.mode === "url") {
     throw new McpError(payload.error.code, payload.error.message, payload.error.data);
   }
@@ -311,7 +305,6 @@ function registerTools(
   requestTracker: RequestTracker,
   options: RegisterToolsOptions = {}
 ): void {
-  const mcpServer = options.mcpServer;
   const { codemodeEnabled = true } = options;
   // ---------------------------------------------------------------------------
   // Server Management Tools
@@ -621,7 +614,7 @@ function registerTools(
       } catch (err) {
         if (err instanceof BackendAuthRequiredError) {
           requestTracker.failRequest(requestId, "auth_required");
-          return handleBackendAuthRequired(err, session, mcpServer);
+          return handleBackendAuthRequired(err, session);
         }
         const message = err instanceof Error ? err.message : String(err);
         requestTracker.failRequest(requestId, message);
@@ -794,7 +787,7 @@ function registerTools(
       } catch (err) {
         if (err instanceof BackendAuthRequiredError) {
           requestTracker.failRequest(requestId, "auth_required");
-          return handleBackendAuthRequired(err, session, mcpServer);
+          return handleBackendAuthRequired(err, session);
         }
         const message = err instanceof Error ? err.message : String(err);
         requestTracker.failRequest(requestId, message);
@@ -830,7 +823,7 @@ function registerTools(
         return toolSuccess(`Subscribed to resource '${uri}' on server '${serverName}'`, session);
       } catch (err) {
         if (err instanceof BackendAuthRequiredError) {
-          return handleBackendAuthRequired(err, session, mcpServer);
+          return handleBackendAuthRequired(err, session);
         }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to subscribe to resource: ${message}`);
@@ -865,7 +858,7 @@ function registerTools(
         return toolSuccess(`Unsubscribed from resource '${uri}' on server '${serverName}'`, session);
       } catch (err) {
         if (err instanceof BackendAuthRequiredError) {
-          return handleBackendAuthRequired(err, session, mcpServer);
+          return handleBackendAuthRequired(err, session);
         }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to unsubscribe from resource: ${message}`);
@@ -956,7 +949,7 @@ function registerTools(
         return toolJson(result, session);
       } catch (err) {
         if (err instanceof BackendAuthRequiredError) {
-          return handleBackendAuthRequired(err, session, mcpServer);
+          return handleBackendAuthRequired(err, session);
         }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to get prompt: ${message}`);
@@ -1818,7 +1811,6 @@ function main(): void {
   // Register all tools
   registerTools(mcpServer, sessionManager, transportToSession, requestTracker, {
     codemodeEnabled: !noCodemode,
-    mcpServer,
   });
 
   function sendHtmlError(
@@ -2145,6 +2137,13 @@ function main(): void {
         // Create per-transport event store for SSE resumability
         const eventStore = new SSEEventStore({ logger });
 
+        // Per-transport capture of the client's advertised capabilities.
+        // The shared McpServer's internal _clientCapabilities field is
+        // overwritten by every `initialize` from any transport, so reading
+        // it at tool-call time can leak capabilities across sessions. We
+        // sniff this transport's initialize message ourselves instead.
+        const capsHolder: { caps?: ClientCapabilities } = {};
+
         const newTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: (): string => crypto.randomUUID(),
           eventStore, // Enable SSE resumability via Last-Event-ID
@@ -2155,6 +2154,9 @@ function main(): void {
             void sessionManager.createSession().then((session) => {
               transportToSession.set(newTransportSessionId, session.sessionId);
               sessionToTransport.set(session.sessionId, newTransport);
+              if (capsHolder.caps) {
+                session.clientCapabilities = capsHolder.caps;
+              }
               logger.info("Session created", {
                 transportSessionId: newTransportSessionId,
                 sessionId: session.sessionId,
@@ -2163,6 +2165,23 @@ function main(): void {
           },
         });
         transport = newTransport;
+
+        // Install a pre-connect onmessage sniffer. The SDK's connect()
+        // preserves an existing onmessage and invokes it before its own
+        // handler (see shared/protocol.ts), so assigning here wins the race.
+        newTransport.onmessage = (message): void => {
+          const asObj = message as { method?: unknown; params?: unknown };
+          if (
+            asObj.method === "initialize" &&
+            typeof asObj.params === "object" &&
+            asObj.params !== null
+          ) {
+            const params = asObj.params as { capabilities?: ClientCapabilities };
+            if (params.capabilities) {
+              capsHolder.caps = params.capabilities;
+            }
+          }
+        };
 
         // Connect to MCP server
         void mcpServer.connect(newTransport);

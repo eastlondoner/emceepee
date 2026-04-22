@@ -37,6 +37,12 @@ export type {
   TaskManagerConfig,
 } from "./state/task-manager.js";
 
+// HTTP upstream auth mode — canonical definition lives with the
+// ServerConfigRegistry; re-exported here so ProxyConfig consumers can use
+// the same literal type without importing from session internals.
+import type { HttpAuthMode } from "./session/server-config.js";
+export type { HttpAuthMode };
+
 // =============================================================================
 // New Types for Refactored Architecture
 // =============================================================================
@@ -84,13 +90,6 @@ export interface ReconciliationResult {
   refreshedResources: boolean;
   refreshedPrompts: boolean;
 }
-
-/**
- * Upstream authentication mode for an HTTP backend (mirrors HttpAuthMode
- * in ./session/server-config.ts — kept here so the public ProxyConfig type
- * doesn't pull from the session internals module).
- */
-export type HttpAuthMode = "none" | "oauth";
 
 /**
  * Configuration for a backend HTTP MCP server
