@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "emceepee": {
+      "type": "stdio",
+      "command": "bun",
+      "args": [
+        "run",
+        "/Users/andy/repos/archil/emceepee/src/server-stdio.ts"
+      ],
+      "env": {
+        "EMCEEPEE_LOG_DIR": "/Users/andy/repos/archil/emceepee/testing/logs",
+        "EMCEEPEE_STDIO_OAUTH_TIMEOUT_MS": "1800000"
+      }
+    }
+  }
+}

@@ -331,6 +331,7 @@ interface StdioOAuthContext {
   tokenStore: BackendTokenStore;
   dcrStore: FileDcrStore;
   logger: StructuredLogger;
+  oauthTimeoutMs?: number;
 }
 
 function registerTools(
@@ -341,7 +342,7 @@ function registerTools(
   options: RegisterToolsOptions = {}
 ): void {
   const { codemodeEnabled = true } = options;
-  const { tokenStore, dcrStore, logger } = oauthCtx;
+  const { tokenStore, dcrStore, logger, oauthTimeoutMs } = oauthCtx;
 
   /**
    * Turn a BackendAuthRequiredError raised inside a stdio tool handler
@@ -367,6 +368,7 @@ function registerTools(
         dcrStore,
         ...(cfg.oauthScopes ? { scopes: cfg.oauthScopes } : {}),
         logger,
+        ...(oauthTimeoutMs !== undefined ? { timeoutMs: oauthTimeoutMs } : {}),
       });
       if (flow.status === "redirect" && flow.authorizationUrl) {
         void flow.completion.then((result) => {
@@ -449,6 +451,7 @@ function registerTools(
               dcrStore,
               ...(oauthScopes ? { scopes: oauthScopes } : {}),
               logger,
+              ...(oauthTimeoutMs !== undefined ? { timeoutMs: oauthTimeoutMs } : {}),
             });
 
             if (flow.status === "redirect" && flow.authorizationUrl) {
@@ -536,6 +539,7 @@ function registerTools(
               dcrStore,
               ...(oauthScopes ? { scopes: oauthScopes } : {}),
               logger,
+              ...(oauthTimeoutMs !== undefined ? { timeoutMs: oauthTimeoutMs } : {}),
             });
             if (flow.status === "redirect" && flow.authorizationUrl) {
               void flow.completion.then((result) => {
@@ -1804,11 +1808,21 @@ async function main(): Promise<void> {
   logger.info("Session created", { sessionId: activeSession.sessionId });
 
   // Register all tools with a getter for the active session
+  const stdioOauthTimeoutMs = Number(
+    process.env["EMCEEPEE_STDIO_OAUTH_TIMEOUT_MS"]
+  );
   registerTools(
     mcpServer,
     sessionManager,
     () => activeSession,
-    { tokenStore, dcrStore, logger },
+    {
+      tokenStore,
+      dcrStore,
+      logger,
+      ...(Number.isFinite(stdioOauthTimeoutMs) && stdioOauthTimeoutMs > 0
+        ? { oauthTimeoutMs: stdioOauthTimeoutMs }
+        : {}),
+    },
     { codemodeEnabled: !noCodemode }
   );
 
