@@ -48,11 +48,17 @@ From any connected MCP client, call the `add_server` tool:
 tool response. The user opens that URL in their browser; the listener
 catches the callback, exchanges the code for tokens, and closes. Then
 any tool call on the server connects with the cached bearer. The
-listener times out after 10 minutes if no callback arrives.
+listener times out after 10 minutes if no callback arrives. Bump
+with `EMCEEPEE_STDIO_OAUTH_TIMEOUT_MS` (milliseconds) if a human is
+clicking through a slow consent screen.
 
 If the refresh token later becomes invalid, tool calls will return an
 `authorization required` error — run `add_server` again to trigger a
 fresh flow.
+
+For a reproducible end-to-end test harness (tmux + claude-code driving
+the stdio server against `disk-mcp-cf`), see
+[E2E_OAUTH_TESTING.md](./E2E_OAUTH_TESTING.md).
 
 ### emceepee-http mode
 
@@ -123,6 +129,7 @@ See `.env.example` for the full list:
 | `EMCEEPEE_BASE_URL` | `http://localhost:${PORT}` | Public URL for OAuth redirect + `/connect` links |
 | `EMCEEPEE_DCR_STORE_PATH` | `~/.emceepee/dcr-clients.json` | Where DCR registrations are persisted |
 | `EMCEEPEE_STDIO_OAUTH_PORT` | 14500 | Placeholder port for stdio mode's session-manager provider. Not the listener port (listeners use kernel-assigned random ports). |
+| `EMCEEPEE_STDIO_OAUTH_TIMEOUT_MS` | 600000 | Stdio-mode ephemeral listener timeout (ms). Bump for slow manual consent flows. |
 
 ## Security posture
 

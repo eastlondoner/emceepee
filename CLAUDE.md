@@ -146,6 +146,12 @@ See [MCP_TESTING_GUIDE.md](./MCP_TESTING_GUIDE.md) for detailed instructions on:
 - Handling server restarts and reconnections
 - Daisy-chaining emceepee instances to test changes to emceepee itself
 
+For end-to-end OAuth testing (tmux + claude-code driving the stdio
+server against a real OAuth-protected upstream like `disk-mcp-cf`),
+see [docs/E2E_OAUTH_TESTING.md](./docs/E2E_OAUTH_TESTING.md). The
+`testing/` directory at the repo root is the harness — it contains
+an `.mcp.json` wired up with a generous listener timeout.
+
 ## Publishing
 
 **Do NOT run `npm publish` manually.** npm publishing is handled automatically by GitHub CI when releases are created.
