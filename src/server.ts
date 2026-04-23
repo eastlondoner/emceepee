@@ -15,8 +15,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
-import { createServer } from "http";
+import type {
+  ServerRequest,
+  ServerNotification,
+  ClientCapabilities,
+} from "@modelcontextprotocol/sdk/types.js";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
+import { createServer, type ServerResponse } from "http";
 import { z } from "zod";
 import { readFileSync } from "fs";
 
@@ -25,6 +31,13 @@ import type { SessionState } from "./session/session-state.js";
 import { SSEEventStore } from "./session/sse-event-store.js";
 import type { ProxyConfig } from "./types.js";
 import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
+import { BackendAuthRequiredError } from "./auth/backend/errors.js";
+import { escapeHtml, renderHtmlPage } from "./auth/html-util.js";
+import { BackendTokenStore } from "./auth/backend/token-store.js";
+import { FileDcrStore } from "./auth/backend/dcr-store.js";
+import { PendingFlowRegistry, type PendingFlow } from "./auth/backend/pending-flows.js";
+import { makeOAuthClientProvider } from "./auth/backend/oauth-provider.js";
+import { buildAuthElicitation } from "./auth/backend/elicitation.js";
 import { createConsoleLogger } from "./logging.js";
 import { RequestTracker } from "./request-tracker.js";
 import { generateWaterfallHTML, generateWaterfallJSON } from "./waterfall-ui.js";
@@ -256,6 +269,27 @@ interface RegisterToolsOptions {
   codemodeEnabled?: boolean;
 }
 
+/**
+ * Translate a BackendAuthRequiredError into either a thrown URL-mode JSON-RPC
+ * error (for clients that advertise URL elicitation) or a plaintext fallback
+ * tool result (for clients that don't).
+ *
+ * Reads capabilities only from the session's own record — populated when the
+ * session's initialize request was sniffed on its transport. Do NOT fall back
+ * to the shared McpServer's getClientCapabilities(): that field is overwritten
+ * by every initialize from any transport and would leak between sessions.
+ */
+function handleBackendAuthRequired(
+  err: BackendAuthRequiredError,
+  session: SessionState
+): ToolResponse {
+  const payload = buildAuthElicitation(session.clientCapabilities, err);
+  if (payload.mode === "url") {
+    throw new McpError(payload.error.code, payload.error.message, payload.error.data);
+  }
+  return payload.result;
+}
+
 function registerTools(
   server: McpServer,
   sessionManager: SessionManager,
@@ -280,7 +314,9 @@ function registerTools(
       inputSchema: {
         name: z.string().describe("Unique name for this server"),
         url: z.string().url().optional().describe("HTTP URL of the MCP server endpoint (for HTTP transport)"),
-        headers: z.record(z.string()).optional().describe("Custom headers to send with HTTP requests (e.g., {\"Authorization\": \"Bearer token\"})"),
+        headers: z.record(z.string()).optional().describe("Custom headers to send with HTTP requests (e.g., {\"Authorization\": \"Bearer token\"}). Ignored when authMode is 'oauth'."),
+        authMode: z.enum(["none", "oauth"]).optional().describe("HTTP auth mode. 'none' (default) passes `headers` through. 'oauth' makes emceepee proxy OAuth 2.1 + PKCE + DCR on the user's behalf; requires emceepee-http (not stdio)."),
+        oauthScopes: z.array(z.string()).optional().describe("Optional OAuth scopes to request (only used when authMode='oauth')."),
         command: z.string().optional().describe("Command to spawn (for stdio transport, e.g., 'node', 'npx', 'python')"),
         args: z.array(z.string()).optional().describe("Arguments for the command (for stdio transport)"),
         env: z.record(z.string()).optional().describe("Environment variables for the spawned process (stdio only)"),
@@ -294,7 +330,7 @@ function registerTools(
         }).optional().describe("Restart configuration for stdio servers"),
       },
     },
-    async ({ name, url, headers, command, args, env, cwd, restartConfig }, extra): Promise<ToolResponse> => {
+    async ({ name, url, headers, authMode, oauthScopes, command, args, env, cwd, restartConfig }, extra): Promise<ToolResponse> => {
       const session = getSessionForTool(sessionManager, extra, sessions);
       if (!session) {
         return toolError("Session not found");
@@ -314,8 +350,12 @@ function registerTools(
 
         if (url) {
           // HTTP transport
-          connection = await sessionManager.addServer(session.sessionId, name, url, { headers });
-          serverDescription = url;
+          connection = await sessionManager.addServer(session.sessionId, name, url, {
+            headers,
+            authMode,
+            oauthScopes,
+          });
+          serverDescription = `${url}${authMode === "oauth" ? " (oauth)" : ""}`;
         } else if (command) {
           // Stdio transport
           connection = await sessionManager.addStdioServer(
@@ -337,6 +377,11 @@ function registerTools(
           session
         );
       } catch (err) {
+        // OAuth upstream whose initialize returned 401: surface the
+        // elicitation so the client can open the authorize URL.
+        if (err instanceof BackendAuthRequiredError) {
+          return handleBackendAuthRequired(err, session);
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to add server: ${message}`);
       }
@@ -564,6 +609,10 @@ function registerTools(
           isError: result.isError,
         };
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          requestTracker.failRequest(requestId, "auth_required");
+          return handleBackendAuthRequired(err, session);
+        }
         const message = err instanceof Error ? err.message : String(err);
         requestTracker.failRequest(requestId, message);
         return toolError(`Failed to execute tool: ${message}`);
@@ -733,6 +782,10 @@ function registerTools(
         requestTracker.completeRequest(requestId, `${String(contents.length)} content(s)`);
         return toolJson({ contents }, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          requestTracker.failRequest(requestId, "auth_required");
+          return handleBackendAuthRequired(err, session);
+        }
         const message = err instanceof Error ? err.message : String(err);
         requestTracker.failRequest(requestId, message);
         return toolError(`Failed to read resource: ${message}`);
@@ -766,6 +819,9 @@ function registerTools(
         await client.subscribeResource(uri);
         return toolSuccess(`Subscribed to resource '${uri}' on server '${serverName}'`, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          return handleBackendAuthRequired(err, session);
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to subscribe to resource: ${message}`);
       }
@@ -798,6 +854,9 @@ function registerTools(
         await client.unsubscribeResource(uri);
         return toolSuccess(`Unsubscribed from resource '${uri}' on server '${serverName}'`, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          return handleBackendAuthRequired(err, session);
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to unsubscribe from resource: ${message}`);
       }
@@ -886,6 +945,9 @@ function registerTools(
         const result = await client.getPrompt(name, promptArgs ?? {});
         return toolJson(result, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          return handleBackendAuthRequired(err, session);
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to get prompt: ${message}`);
       }
@@ -1644,7 +1706,40 @@ function main(): void {
   const { configPath, port, logLevel, noCodemode } = parseArgs();
   const logger = createConsoleLogger(logLevel);
 
-  logger.info("Starting MCP Proxy Server", { port, configPath, codemodeEnabled: !noCodemode });
+  const host = process.env["EMCEEPEE_HOST"] ?? "127.0.0.1";
+  const baseUrl = (
+    process.env["EMCEEPEE_BASE_URL"] ?? `http://localhost:${String(port)}`
+  ).replace(/\/+$/, "");
+  const oauthRedirectUri = `${baseUrl}/oauth/callback`;
+  const dcrStorePath = process.env["EMCEEPEE_DCR_STORE_PATH"];
+
+  const isLoopbackHost =
+    host === "127.0.0.1" || host === "localhost" || host === "::1";
+
+  logger.info("Starting MCP Proxy Server", {
+    port,
+    host,
+    baseUrl,
+    configPath,
+    codemodeEnabled: !noCodemode,
+  });
+
+  if (!isLoopbackHost) {
+    const warning =
+      `EMCEEPEE_HOST=${host} is not a loopback address. ` +
+      `emceepee-http has no frontend authentication and exposes management ` +
+      `tools for any connected MCP client. Bind to 127.0.0.1 unless you ` +
+      `have deliberately placed it behind a trusted proxy.`;
+    console.warn(`\n!!! ${warning} !!!\n`);
+    logger.warn("non_loopback_host", { host, baseUrl });
+  }
+
+  // Upstream OAuth support (in-memory tokens, on-disk DCR clients).
+  const tokenStore = new BackendTokenStore();
+  const dcrStore = new FileDcrStore(
+    dcrStorePath ? { path: dcrStorePath, logger } : { logger }
+  );
+  const pendingFlows = new PendingFlowRegistry({ logger });
 
   // Create session manager
   // Use long timeout - sessions are typically long-lived dev sessions with Cursor
@@ -1652,6 +1747,10 @@ function main(): void {
     logger,
     sessionTimeoutMs: 24 * 60 * 60 * 1000, // 24 hours (effectively infinite for dev sessions)
     cleanupIntervalMs: 60 * 60 * 1000, // 1 hour
+    tokenStore,
+    dcrStore,
+    pendingFlows,
+    baseUrl,
   });
 
   // Load initial servers from config if provided
@@ -1665,8 +1764,16 @@ function main(): void {
 
       for (const server of config.servers) {
         if (isHttpServerConfig(server)) {
-          logger.info("Adding HTTP server config", { name: server.name, url: server.url });
-          sessionManager.getServerConfigs().addConfig(server.name, server.url);
+          logger.info("Adding HTTP server config", {
+            name: server.name,
+            url: server.url,
+            authMode: server.authMode ?? "none",
+          });
+          sessionManager.getServerConfigs().addConfig(server.name, server.url, {
+            headers: server.headers,
+            authMode: server.authMode,
+            oauthScopes: server.oauthScopes,
+          });
         } else if (isStdioServerConfig(server)) {
           logger.info("Adding stdio server config", { name: server.name, command: server.command });
           sessionManager.getServerConfigs().addStdioConfig(
@@ -1697,11 +1804,285 @@ function main(): void {
   // Map transport session IDs to our session IDs
   const transportToSession = new Map<string, string>();
   const transports = new Map<string, StreamableHTTPServerTransport>();
+  /** Inverse lookup: our sessionId → transport, so callback handlers can push `notifications/elicitation/complete`. */
+  const sessionToTransport = new Map<string, StreamableHTTPServerTransport>();
 
   // Register all tools
   registerTools(mcpServer, sessionManager, transportToSession, requestTracker, {
     codemodeEnabled: !noCodemode,
   });
+
+  function sendHtmlError(
+    res: ServerResponse,
+    status: number,
+    title: string,
+    detail: unknown
+  ): void {
+    const message =
+      detail instanceof Error
+        ? detail.message
+        : typeof detail === "string"
+          ? detail
+          : detail === undefined || detail === null
+            ? ""
+            : JSON.stringify(detail);
+    res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(renderHtmlPage(title, "", message || undefined));
+  }
+
+  /**
+   * Render a success page. `bodyHtml` is RAW HTML (contains already-
+   * escaped content the caller controls) — it's appended as-is after
+   * the title. Use only with trusted, caller-constructed markup.
+   */
+  function sendHtmlOk(
+    res: ServerResponse,
+    title: string,
+    bodyHtml: string
+  ): void {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(
+      `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
+        `<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;color:#222}` +
+        `h1{margin-bottom:.5rem}</style></head>` +
+        `<body><h1>${escapeHtml(title)}</h1>${bodyHtml}</body></html>`
+    );
+  }
+
+  /**
+   * GET /connect/:server — start an upstream OAuth flow for the named server
+   * and redirect the browser to the authorization URL. Used when a user wants
+   * to pre-authorize instead of being prompted by an elicitation.
+   */
+  async function handleConnect(
+    url: URL,
+    res: ServerResponse
+  ): Promise<void> {
+    const serverName = decodeURIComponent(url.pathname.slice("/connect/".length));
+    if (!serverName) {
+      sendHtmlError(res, 400, "Missing server name", "");
+      return;
+    }
+
+    const serverConfig = sessionManager.getServerConfigs().getConfig(serverName);
+    if (serverConfig?.type !== "http") {
+      sendHtmlError(res, 404, "Unknown server", `No HTTP server config for '${serverName}'.`);
+      return;
+    }
+    if (serverConfig.authMode !== "oauth") {
+      sendHtmlError(
+        res,
+        400,
+        "Server is not OAuth-protected",
+        `'${serverName}' is configured with authMode="${serverConfig.authMode ?? "none"}". ` +
+          `Set authMode="oauth" when registering the server.`
+      );
+      return;
+    }
+
+    // Short-circuit if a flow is already in progress for this server.
+    const existing = pendingFlows.findByServer(serverName);
+    if (existing) {
+      res.writeHead(302, { Location: existing.authorizationUrl });
+      res.end();
+      return;
+    }
+
+    // The redirect state is wrapped in a container so TS flow analysis
+    // doesn't narrow `redirected` to a literal `false` past the callback.
+    const state: { redirected: boolean } = { redirected: false };
+    const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
+      serverName,
+      serverUrl: serverConfig.url,
+      redirectUri: oauthRedirectUri,
+      sessionId: "system:/connect",
+      tokenStore,
+      dcrStore,
+      pendingFlows,
+      logger,
+    };
+    if (serverConfig.oauthScopes) providerOpts.scopes = serverConfig.oauthScopes;
+    const provider = makeOAuthClientProvider(providerOpts);
+    provider.onAuthorizationRequired = (authUrl: string): void => {
+      state.redirected = true;
+      res.writeHead(302, { Location: authUrl });
+      res.end();
+    };
+
+    await provider.ensureIssuer();
+
+    try {
+      const result = await auth(provider, { serverUrl: serverConfig.url });
+      if (!state.redirected) {
+        if (result === "AUTHORIZED") {
+          sendHtmlOk(
+            res,
+            "Already connected",
+            `<p>'${escapeHtml(serverName)}' is already authorized. You can close this tab.</p>`
+          );
+        } else {
+          sendHtmlError(
+            res,
+            500,
+            "Unexpected auth result",
+            `auth() returned '${result}' without calling redirectToAuthorization`
+          );
+        }
+      }
+    } catch (err) {
+      if (!state.redirected) {
+        sendHtmlError(res, 500, "Authorization failed", err);
+      }
+    }
+  }
+
+  /**
+   * GET /oauth/callback?code=...&state=... — exchange the code for tokens
+   * using the pending flow's provider, then notify the originating session.
+   */
+  async function handleOAuthCallback(
+    url: URL,
+    res: ServerResponse
+  ): Promise<void> {
+    const stateParam = url.searchParams.get("state");
+    const code = url.searchParams.get("code");
+    const errorParam = url.searchParams.get("error");
+    const errorDescription = url.searchParams.get("error_description");
+
+    if (!stateParam) {
+      sendHtmlError(res, 400, "Missing state", "OAuth callback requires a state parameter.");
+      return;
+    }
+
+    const flow = pendingFlows.consumeByState(stateParam);
+    if (!flow) {
+      sendHtmlError(
+        res,
+        404,
+        "Unknown or expired flow",
+        "No pending OAuth flow matches this state. The flow may have expired (10-minute TTL) or already completed."
+      );
+      return;
+    }
+
+    if (errorParam) {
+      const msg = errorDescription ? `${errorParam}: ${errorDescription}` : errorParam;
+      emitElicitationComplete(flow, "failed", msg);
+      sendHtmlError(res, 400, "Authorization denied", msg);
+      return;
+    }
+
+    if (!code) {
+      emitElicitationComplete(flow, "failed", "Missing authorization code");
+      sendHtmlError(res, 400, "Missing code", "OAuth callback returned no authorization code.");
+      return;
+    }
+
+    const serverConfig = sessionManager.getServerConfigs().getConfig(flow.serverName);
+    if (serverConfig?.type !== "http") {
+      const msg = `Server config for '${flow.serverName}' is gone`;
+      emitElicitationComplete(flow, "failed", msg);
+      sendHtmlError(res, 404, "Unknown server", msg);
+      return;
+    }
+
+    // The sessionId on this provider only matters if redirectToAuthorization
+    // is called during the callback (it shouldn't be — this is the
+    // authorization_code exchange path, not a fresh auth). Using any
+    // subscriber from the original flow is fine.
+    const initiatingSessionId = flow.sessionIds.values().next().value ?? "system:/callback";
+    const providerOpts: Parameters<typeof makeOAuthClientProvider>[0] = {
+      serverName: flow.serverName,
+      serverUrl: serverConfig.url,
+      redirectUri: oauthRedirectUri,
+      sessionId: initiatingSessionId,
+      tokenStore,
+      dcrStore,
+      pendingFlows,
+      logger,
+      // Pin the verifier captured when the authorize URL was registered.
+      // A concurrent second auth() call on the same server runs
+      // startAuthorization independently and overwrites
+      // tokenStore.codeVerifier; without pinning, this callback would
+      // exchange the code against the wrong PKCE verifier and fail.
+      pinnedCodeVerifier: flow.codeVerifier,
+    };
+    if (serverConfig.oauthScopes) providerOpts.scopes = serverConfig.oauthScopes;
+    const provider = makeOAuthClientProvider(providerOpts);
+
+    try {
+      await provider.ensureIssuer();
+      const result = await auth(provider, {
+        serverUrl: serverConfig.url,
+        authorizationCode: code,
+      });
+      if (result === "AUTHORIZED") {
+        emitElicitationComplete(flow, "completed");
+        sendHtmlOk(
+          res,
+          `Connected '${flow.serverName}'`,
+          `<p>Authorization complete. You can close this tab and return to your MCP client.</p>`
+        );
+      } else {
+        const msg = `auth() returned '${result}' after code exchange`;
+        emitElicitationComplete(flow, "failed", msg);
+        sendHtmlError(res, 500, "Authorization incomplete", msg);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      emitElicitationComplete(flow, "failed", msg);
+      sendHtmlError(res, 500, "Token exchange failed", err);
+    }
+  }
+
+  /**
+   * Push `notifications/elicitation/complete` into the originating session's
+   * SSE stream (best-effort) and emit `elicitation_completed` into the
+   * session's event system for await_activity consumers.
+   */
+  function emitElicitationComplete(
+    flow: PendingFlow,
+    status: "completed" | "failed",
+    errorMessage?: string
+  ): void {
+    const params: Record<string, unknown> = {
+      server: flow.serverName,
+      status,
+    };
+    if (errorMessage !== undefined) {
+      params["error"] = errorMessage;
+    }
+
+    // Broadcast to every session that was subscribed to this flow.
+    // Single-flight dedupe attaches additional sessionIds to a flow when a
+    // concurrent caller reuses the in-flight authorize URL; all of them
+    // must be notified or the later caller hangs on await_activity.
+    for (const sid of flow.sessionIds) {
+      const session = sessionManager.getSession(sid);
+      if (session) {
+        session.eventSystem.addEvent("elicitation_completed", flow.serverName, {
+          server: flow.serverName,
+          status,
+          error: errorMessage,
+        });
+      }
+      const transport = sessionToTransport.get(sid);
+      if (transport) {
+        void transport
+          .send({
+            jsonrpc: "2.0",
+            method: "notifications/elicitation/complete",
+            params,
+          })
+          .catch((err: unknown) => {
+            logger.debug("elicitation_notification_send_failed", {
+              sessionId: sid,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      }
+    }
+  }
 
   // Create HTTP server
   const httpServer = createServer((req, res) => {
@@ -1722,10 +2103,24 @@ function main(): void {
       return;
     }
 
+    // --- OAuth backend proxy: /connect/:server and /oauth/callback --------
+    if (url.pathname.startsWith("/connect/")) {
+      void handleConnect(url, res).catch((err: unknown) => {
+        sendHtmlError(res, 500, "Internal error", err);
+      });
+      return;
+    }
+    if (url.pathname === "/oauth/callback") {
+      void handleOAuthCallback(url, res).catch((err: unknown) => {
+        sendHtmlError(res, 500, "Internal error", err);
+      });
+      return;
+    }
+
     // Only handle /mcp endpoint for MCP protocol
     if (url.pathname !== "/mcp") {
       res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Not found. Available endpoints: /mcp, /waterfall, /waterfall/json" }));
+      res.end(JSON.stringify({ error: "Not found. Available endpoints: /mcp, /connect/<server>, /oauth/callback, /waterfall, /waterfall/json" }));
       return;
     }
 
@@ -1751,6 +2146,13 @@ function main(): void {
         // Create per-transport event store for SSE resumability
         const eventStore = new SSEEventStore({ logger });
 
+        // Per-transport capture of the client's advertised capabilities.
+        // The shared McpServer's internal _clientCapabilities field is
+        // overwritten by every `initialize` from any transport, so reading
+        // it at tool-call time can leak capabilities across sessions. We
+        // sniff this transport's initialize message ourselves instead.
+        const capsHolder: { caps?: ClientCapabilities } = {};
+
         const newTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: (): string => crypto.randomUUID(),
           eventStore, // Enable SSE resumability via Last-Event-ID
@@ -1760,6 +2162,10 @@ function main(): void {
             // Create our session and map it
             void sessionManager.createSession().then((session) => {
               transportToSession.set(newTransportSessionId, session.sessionId);
+              sessionToTransport.set(session.sessionId, newTransport);
+              if (capsHolder.caps) {
+                session.clientCapabilities = capsHolder.caps;
+              }
               logger.info("Session created", {
                 transportSessionId: newTransportSessionId,
                 sessionId: session.sessionId,
@@ -1768,6 +2174,23 @@ function main(): void {
           },
         });
         transport = newTransport;
+
+        // Install a pre-connect onmessage sniffer. The SDK's connect()
+        // preserves an existing onmessage and invokes it before its own
+        // handler (see shared/protocol.ts), so assigning here wins the race.
+        newTransport.onmessage = (message): void => {
+          const asObj = message as { method?: unknown; params?: unknown };
+          if (
+            asObj.method === "initialize" &&
+            typeof asObj.params === "object" &&
+            asObj.params !== null
+          ) {
+            const params = asObj.params as { capabilities?: ClientCapabilities };
+            if (params.capabilities) {
+              capsHolder.caps = params.capabilities;
+            }
+          }
+        };
 
         // Connect to MCP server
         void mcpServer.connect(newTransport);
@@ -1811,6 +2234,7 @@ function main(): void {
           if (ourSessionId) {
             void sessionManager.destroySession(ourSessionId);
             transportToSession.delete(transportSessionId);
+            sessionToTransport.delete(ourSessionId);
             logger.info("session_closed_via_sse", { transportSessionId, sessionId: ourSessionId });
           }
         }
@@ -1844,6 +2268,7 @@ function main(): void {
         if (ourSessionId) {
           void sessionManager.destroySession(ourSessionId);
           transportToSession.delete(transportSessionId);
+          sessionToTransport.delete(ourSessionId);
         }
 
         logger.info("Session closed", { transportSessionId });
@@ -1868,6 +2293,8 @@ function main(): void {
     // Shutdown session manager (cleans up all sessions)
     await sessionManager.shutdown();
 
+    pendingFlows.shutdown();
+
     httpServer.close();
     process.exit(0);
   };
@@ -1876,10 +2303,11 @@ function main(): void {
   process.on("SIGTERM", () => void shutdown());
 
   // Start server
-  httpServer.listen(port, () => {
-    logger.info("Server started", { url: `http://localhost:${String(port)}/mcp` });
-    console.log(`MCP Proxy Server running at http://localhost:${String(port)}/mcp`);
-    console.log(`Waterfall UI available at http://localhost:${String(port)}/waterfall`);
+  httpServer.listen(port, host, () => {
+    logger.info("Server started", { url: `${baseUrl}/mcp`, host });
+    console.log(`MCP Proxy Server running at ${baseUrl}/mcp`);
+    console.log(`Waterfall UI available at ${baseUrl}/waterfall`);
+    console.log(`OAuth endpoints: ${baseUrl}/connect/<server>, ${baseUrl}/oauth/callback`);
     console.log("\nAvailable tools:");
     console.log("  Server management: add_server, remove_server, reconnect_server, list_servers");
     console.log("  Tools: list_tools, execute_tool");

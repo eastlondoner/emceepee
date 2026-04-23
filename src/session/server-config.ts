@@ -12,6 +12,14 @@ import type { StructuredLogger } from "../logging.js";
 import type { StdioRestartConfig } from "../types.js";
 
 /**
+ * Upstream authentication mode for an HTTP backend.
+ * - "none" (default): send `headers` as-is (typically bearer token pasted manually).
+ * - "oauth": proxy OAuth 2.1 + PKCE + Dynamic Client Registration on the
+ *   user's behalf. `headers` is ignored in this mode.
+ */
+export type HttpAuthMode = "none" | "oauth";
+
+/**
  * Configuration for a backend HTTP MCP server
  */
 export interface HttpServerConfig {
@@ -21,8 +29,12 @@ export interface HttpServerConfig {
   type: "http";
   /** HTTP URL of the MCP server endpoint */
   url: string;
-  /** Custom headers to send with requests (e.g., Authorization) */
+  /** Custom headers to send with requests (e.g., Authorization). Ignored if authMode === "oauth". */
   headers?: Record<string, string>;
+  /** Upstream authentication mode (default: "none"). */
+  authMode?: HttpAuthMode;
+  /** Optional OAuth scopes to request (used only when authMode === "oauth"). */
+  oauthScopes?: string[];
   /** When this config was added */
   addedAt: Date;
   /** Session ID that added this config (for logging) */
@@ -106,15 +118,24 @@ export class ServerConfigRegistry {
   public addConfig(
     name: string,
     url: string,
-    options?: { headers?: Record<string, string> },
+    options?: {
+      headers?: Record<string, string>;
+      authMode?: HttpAuthMode;
+      oauthScopes?: string[];
+    },
     addedBy?: string
   ): boolean {
     const existing = this.configs.has(name);
+    const authMode: HttpAuthMode = options?.authMode ?? "none";
+    const effectiveHeaders = authMode === "oauth" ? undefined : options?.headers;
+
     this.configs.set(name, {
       name,
       type: "http",
       url,
-      headers: options?.headers,
+      headers: effectiveHeaders,
+      authMode,
+      oauthScopes: options?.oauthScopes,
       addedAt: new Date(),
       addedBy,
     });
@@ -123,7 +144,8 @@ export class ServerConfigRegistry {
       server: name,
       type: "http",
       url,
-      hasHeaders: options?.headers !== undefined,
+      hasHeaders: effectiveHeaders !== undefined,
+      authMode,
       addedBy,
     });
 

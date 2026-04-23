@@ -118,12 +118,39 @@ bun run dev -- --config ./servers.json
 }
 ```
 
+## OAuth backend
+
+emceepee-http can proxy OAuth 2.1 + PKCE + DCR on behalf of the calling MCP
+client so that OAuth-protected upstream servers (e.g. `disk-mcp-cf`) work
+transparently. See [docs/OAUTH_BACKEND.md](./docs/OAUTH_BACKEND.md) for the
+flow.
+
+Invariant: emceepee-http has no frontend authentication. It binds to
+`EMCEEPEE_HOST=127.0.0.1` by default; non-loopback binds log a warning.
+OAuth upstream support is not available in stdio mode — use emceepee-http.
+
+Environment variables (see `.env.example`):
+
+- `PORT` (default 8080)
+- `EMCEEPEE_HOST` (default 127.0.0.1)
+- `EMCEEPEE_BASE_URL` (default `http://localhost:${PORT}`)
+- `EMCEEPEE_DCR_STORE_PATH` (default `~/.emceepee/dcr-clients.json`)
+
+Upstream tokens are in-memory only; DCR client registrations persist keyed
+by authorization-server issuer URL.
+
 ## Testing Guide
 
 See [MCP_TESTING_GUIDE.md](./MCP_TESTING_GUIDE.md) for detailed instructions on:
 - Testing MCP servers through emceepee
 - Handling server restarts and reconnections
 - Daisy-chaining emceepee instances to test changes to emceepee itself
+
+For end-to-end OAuth testing (tmux + claude-code driving the stdio
+server against a real OAuth-protected upstream like `disk-mcp-cf`),
+see [docs/E2E_OAUTH_TESTING.md](./docs/E2E_OAUTH_TESTING.md). The
+`testing/` directory at the repo root is the harness — it contains
+an `.mcp.json` wired up with a generous listener timeout.
 
 ## Publishing
 

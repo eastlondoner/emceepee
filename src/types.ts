@@ -37,6 +37,12 @@ export type {
   TaskManagerConfig,
 } from "./state/task-manager.js";
 
+// HTTP upstream auth mode — canonical definition lives with the
+// ServerConfigRegistry; re-exported here so ProxyConfig consumers can use
+// the same literal type without importing from session internals.
+import type { HttpAuthMode } from "./session/server-config.js";
+export type { HttpAuthMode };
+
 // =============================================================================
 // New Types for Refactored Architecture
 // =============================================================================
@@ -93,6 +99,12 @@ export interface HttpServerConfig {
   name: string;
   /** HTTP URL of the MCP server endpoint */
   url: string;
+  /** Custom headers to send with requests. Ignored when authMode === "oauth". */
+  headers?: Record<string, string>;
+  /** Upstream auth mode (default: "none"). */
+  authMode?: HttpAuthMode;
+  /** Optional OAuth scopes (only meaningful when authMode === "oauth"). */
+  oauthScopes?: string[];
 }
 
 /**

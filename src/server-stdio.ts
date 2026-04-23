@@ -24,6 +24,11 @@ import type { SessionState } from "./session/session-state.js";
 import type { ProxyConfig } from "./types.js";
 import { isHttpServerConfig, isStdioServerConfig } from "./types.js";
 import { createFileLogger, createNullLogger, type StructuredLogger } from "./logging.js";
+import { BackendTokenStore } from "./auth/backend/token-store.js";
+import { FileDcrStore } from "./auth/backend/dcr-store.js";
+import { PendingFlowRegistry } from "./auth/backend/pending-flows.js";
+import { runStdioOAuthFlow } from "./auth/backend/stdio-oauth-flow.js";
+import { BackendAuthRequiredError } from "./auth/backend/errors.js";
 
 // Codemode imports
 import {
@@ -322,13 +327,71 @@ interface RegisterToolsOptions {
   codemodeEnabled?: boolean;
 }
 
+interface StdioOAuthContext {
+  tokenStore: BackendTokenStore;
+  dcrStore: FileDcrStore;
+  logger: StructuredLogger;
+  oauthTimeoutMs?: number;
+}
+
 function registerTools(
   server: McpServer,
   sessionManager: SessionManager,
   getActiveSession: () => SessionState | undefined,
+  oauthCtx: StdioOAuthContext,
   options: RegisterToolsOptions = {}
 ): void {
   const { codemodeEnabled = true } = options;
+  const { tokenStore, dcrStore, logger, oauthTimeoutMs } = oauthCtx;
+
+  /**
+   * Turn a BackendAuthRequiredError raised inside a stdio tool handler
+   * into a tool response that kicks off a fresh runStdioOAuthFlow and
+   * asks the user to open the new authorize URL. Returns undefined if
+   * we can't run the flow (e.g. the upstream isn't OAuth-mode) — caller
+   * should fall through to its own generic error handling.
+   */
+  async function handleStdioAuthRequired(
+    err: BackendAuthRequiredError,
+    session: SessionState
+  ): Promise<ToolResponse | undefined> {
+    const cfg = sessionManager.getServerConfigs().getConfig(err.serverName);
+    if (cfg?.type !== "http" || cfg.authMode !== "oauth") {
+      return undefined;
+    }
+    tokenStore.clearTokens(err.serverName);
+    try {
+      const flow = await runStdioOAuthFlow({
+        serverName: err.serverName,
+        serverUrl: cfg.url,
+        tokenStore,
+        dcrStore,
+        ...(cfg.oauthScopes ? { scopes: cfg.oauthScopes } : {}),
+        logger,
+        ...(oauthTimeoutMs !== undefined ? { timeoutMs: oauthTimeoutMs } : {}),
+      });
+      if (flow.status === "redirect" && flow.authorizationUrl) {
+        void flow.completion.then((result) => {
+          if (result.status === "failed") {
+            logger.warn("stdio_oauth_tool_reauth_failed", {
+              name: err.serverName,
+              error: result.error,
+            });
+          }
+        });
+        return toolSuccess(
+          `'${err.serverName}' needs authorization.\n\n` +
+            `Open this URL in your browser:\n${flow.authorizationUrl}\n\n` +
+            `After authorizing, retry this tool.`,
+          session
+        );
+      }
+      return undefined;
+    } catch (flowErr) {
+      const m = flowErr instanceof Error ? flowErr.message : String(flowErr);
+      return toolError(`OAuth flow failed: ${m}`);
+    }
+  }
   // ---------------------------------------------------------------------------
   // Server Management Tools
   // ---------------------------------------------------------------------------
@@ -346,6 +409,8 @@ function registerTools(
         name: z.string().describe("Unique name for this server"),
         url: z.string().url().optional().describe("HTTP URL of the MCP server endpoint (for HTTP transport)"),
         headers: z.record(z.string()).optional().describe("Custom headers to send with HTTP requests (e.g., {\"Authorization\": \"Bearer token\"})"),
+        authMode: z.enum(["none", "oauth"]).optional().describe("HTTP auth mode. 'none' (default) passes `headers` through. 'oauth' makes emceepee broker OAuth 2.1 + PKCE + DCR on the user's behalf; an ephemeral loopback listener receives the callback. First time you use 'oauth' on a server the tool response contains a URL for the user to open."),
+        oauthScopes: z.array(z.string()).optional().describe("Optional OAuth scopes to request (only used when authMode='oauth')."),
         command: z.string().optional().describe("Command to spawn (for stdio transport, e.g., 'node', 'npx', 'python')"),
         args: z.array(z.string()).optional().describe("Arguments for the command (for stdio transport)"),
         env: z.record(z.string()).optional().describe("Environment variables for the spawned process (stdio only)"),
@@ -359,7 +424,7 @@ function registerTools(
         }).optional().describe("Restart configuration for stdio servers"),
       },
     },
-    async ({ name, url, headers, command, args, env, cwd, restartConfig }): Promise<ToolResponse> => {
+    async ({ name, url, headers, authMode, oauthScopes, command, args, env, cwd, restartConfig }): Promise<ToolResponse> => {
       const session = getSession(getActiveSession());
       if (!session) {
         return toolError("Session not initialized");
@@ -373,14 +438,73 @@ function registerTools(
         return toolError("Must provide either 'url' (for HTTP transport) or 'command' (for stdio transport)");
       }
 
+      // OAuth upstream on stdio: run the OAuth flow with an ephemeral
+      // loopback listener, then register the config + connect. If tokens
+      // are already cached from a previous session this fast-paths.
+      if (url && authMode === "oauth") {
+        if (!tokenStore.get(name)?.tokens) {
+          try {
+            const flow = await runStdioOAuthFlow({
+              serverName: name,
+              serverUrl: url,
+              tokenStore,
+              dcrStore,
+              ...(oauthScopes ? { scopes: oauthScopes } : {}),
+              logger,
+              ...(oauthTimeoutMs !== undefined ? { timeoutMs: oauthTimeoutMs } : {}),
+            });
+
+            if (flow.status === "redirect" && flow.authorizationUrl) {
+              // Register the config now so subsequent tool calls (after
+              // the user authorizes) can connect on demand. We don't
+              // block on `completion` — the user has to authorize in
+              // their browser, and we return the URL immediately so
+              // their MCP client can show it.
+              sessionManager.getServerConfigs().addConfig(
+                name,
+                url,
+                {
+                  headers,
+                  authMode: "oauth",
+                  ...(oauthScopes ? { oauthScopes } : {}),
+                },
+                session.sessionId
+              );
+              void flow.completion.then((result) => {
+                if (result.status === "completed") {
+                  logger.info("stdio_oauth_flow_completed", { name });
+                } else {
+                  logger.warn("stdio_oauth_flow_failed", { name, error: result.error });
+                }
+              });
+              return toolSuccess(
+                `'${name}' requires OAuth authorization.\n\n` +
+                  `Open this URL in your browser to connect:\n${flow.authorizationUrl}\n\n` +
+                  `After authorizing, call any tool on '${name}' (e.g. list_tools) to complete the connection.`,
+                session
+              );
+            }
+            // status === "authorized": tokens came back cached mid-flow.
+            // Fall through to the normal addServer path below.
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return toolError(`Failed to start OAuth flow: ${message}`);
+          }
+        }
+      }
+
       try {
         let connection;
         let serverDescription: string;
 
         if (url) {
           // HTTP transport
-          connection = await sessionManager.addServer(session.sessionId, name, url, { headers });
-          serverDescription = url;
+          connection = await sessionManager.addServer(session.sessionId, name, url, {
+            headers,
+            ...(authMode ? { authMode } : {}),
+            ...(oauthScopes ? { oauthScopes } : {}),
+          });
+          serverDescription = `${url}${authMode === "oauth" ? " (oauth)" : ""}`;
         } else if (command) {
           // Stdio transport
           connection = await sessionManager.addStdioServer(
@@ -402,6 +526,39 @@ function registerTools(
           session
         );
       } catch (err) {
+        // If the upstream 401s during initialize (cached tokens stale,
+        // refresh failed), run a fresh ephemeral flow instead of surfacing
+        // a dead-URL elicitation from the session-manager's stub baseUrl.
+        if (err instanceof BackendAuthRequiredError && url && authMode === "oauth") {
+          tokenStore.clearTokens(name);
+          try {
+            const flow = await runStdioOAuthFlow({
+              serverName: name,
+              serverUrl: url,
+              tokenStore,
+              dcrStore,
+              ...(oauthScopes ? { scopes: oauthScopes } : {}),
+              logger,
+              ...(oauthTimeoutMs !== undefined ? { timeoutMs: oauthTimeoutMs } : {}),
+            });
+            if (flow.status === "redirect" && flow.authorizationUrl) {
+              void flow.completion.then((result) => {
+                if (result.status === "failed") {
+                  logger.warn("stdio_oauth_reauth_failed", { name, error: result.error });
+                }
+              });
+              return toolSuccess(
+                `'${name}' needs re-authorization.\n\n` +
+                  `Open this URL in your browser:\n${flow.authorizationUrl}\n\n` +
+                  `After authorizing, call any tool on '${name}' to complete the connection.`,
+                session
+              );
+            }
+          } catch (reauthErr) {
+            const rm = reauthErr instanceof Error ? reauthErr.message : String(reauthErr);
+            return toolError(`Re-authorization failed: ${rm}`);
+          }
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to add server: ${message}`);
       }
@@ -565,6 +722,10 @@ function registerTools(
           isError: result.isError,
         };
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          const reauth = await handleStdioAuthRequired(err, session);
+          if (reauth) return reauth;
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to execute tool: ${message}`);
       }
@@ -724,6 +885,10 @@ function registerTools(
 
         return toolJson({ contents }, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          const reauth = await handleStdioAuthRequired(err, session);
+          if (reauth) return reauth;
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to read resource: ${message}`);
       }
@@ -812,6 +977,10 @@ function registerTools(
         const result = await client.getPrompt(name, promptArgs ?? {});
         return toolJson(result, session);
       } catch (err) {
+        if (err instanceof BackendAuthRequiredError) {
+          const reauth = await handleStdioAuthRequired(err, session);
+          if (reauth) return reauth;
+        }
         const message = err instanceof Error ? err.message : String(err);
         return toolError(`Failed to get prompt: ${message}`);
       }
@@ -1510,11 +1679,33 @@ async function main(): Promise<void> {
 
   logger.info("Starting MCP Proxy Server (stdio mode)", { configPath });
 
+  // OAuth upstream support. emceepee-stdio opens a fresh loopback
+  // listener per flow (runStdioOAuthFlow handles that); the session
+  // manager itself never receives an OAuth callback. We still give the
+  // manager a PendingFlowRegistry and a loopback baseUrl so its
+  // generated provider has the structure needed for silent refresh —
+  // the baseUrl's redirect_uri is never actually visited because we
+  // catch BackendAuthRequiredError in tool handlers and run
+  // runStdioOAuthFlow again instead.
+  const tokenStore = new BackendTokenStore();
+  const dcrStorePath = process.env["EMCEEPEE_DCR_STORE_PATH"];
+  const dcrStore = new FileDcrStore(
+    dcrStorePath ? { path: dcrStorePath, logger } : { logger }
+  );
+  const stdioPendingFlows = new PendingFlowRegistry({ logger });
+  const stdioOauthBaseUrl = `http://127.0.0.1:${String(
+    Number(process.env["EMCEEPEE_STDIO_OAUTH_PORT"]) || 14500
+  )}`;
+
   // Create session manager
   const sessionManager = new SessionManager({
     logger,
     sessionTimeoutMs: 24 * 60 * 60 * 1000, // 24 hours (effectively infinite for dev sessions)
     cleanupIntervalMs: 5 * 60 * 1000, // 5 minutes
+    tokenStore,
+    dcrStore,
+    pendingFlows: stdioPendingFlows,
+    baseUrl: stdioOauthBaseUrl,
   });
 
   // Load initial servers from config (env var JSON takes precedence over file path)
@@ -1530,8 +1721,22 @@ async function main(): Promise<void> {
 
       for (const server of config.servers) {
         if (isHttpServerConfig(server)) {
-          logger.info("Adding HTTP server config", { name: server.name, url: server.url });
-          sessionManager.getServerConfigs().addConfig(server.name, server.url);
+          logger.info("Adding HTTP server config", {
+            name: server.name,
+            url: server.url,
+            authMode: server.authMode ?? "none",
+          });
+          sessionManager.getServerConfigs().addConfig(server.name, server.url, {
+            headers: server.headers,
+            authMode: server.authMode,
+            oauthScopes: server.oauthScopes,
+          });
+          if (server.authMode === "oauth") {
+            logger.info("oauth_server_registered_no_preauth", {
+              name: server.name,
+              hint: "Call add_server (or any tool on this server) to trigger the OAuth flow — the tool handler surfaces an authorize URL in its response.",
+            });
+          }
         } else if (isStdioServerConfig(server)) {
           logger.info("Adding stdio server config", { name: server.name, command: server.command });
           sessionManager.getServerConfigs().addStdioConfig(
@@ -1558,8 +1763,22 @@ async function main(): Promise<void> {
 
       for (const server of config.servers) {
         if (isHttpServerConfig(server)) {
-          logger.info("Adding HTTP server config", { name: server.name, url: server.url });
-          sessionManager.getServerConfigs().addConfig(server.name, server.url);
+          logger.info("Adding HTTP server config", {
+            name: server.name,
+            url: server.url,
+            authMode: server.authMode ?? "none",
+          });
+          sessionManager.getServerConfigs().addConfig(server.name, server.url, {
+            headers: server.headers,
+            authMode: server.authMode,
+            oauthScopes: server.oauthScopes,
+          });
+          if (server.authMode === "oauth") {
+            logger.info("oauth_server_registered_no_preauth", {
+              name: server.name,
+              hint: "Call add_server (or any tool on this server) to trigger the OAuth flow — the tool handler surfaces an authorize URL in its response.",
+            });
+          }
         } else if (isStdioServerConfig(server)) {
           logger.info("Adding stdio server config", { name: server.name, command: server.command });
           sessionManager.getServerConfigs().addStdioConfig(
@@ -1589,9 +1808,23 @@ async function main(): Promise<void> {
   logger.info("Session created", { sessionId: activeSession.sessionId });
 
   // Register all tools with a getter for the active session
-  registerTools(mcpServer, sessionManager, () => activeSession, {
-    codemodeEnabled: !noCodemode,
-  });
+  const stdioOauthTimeoutMs = Number(
+    process.env["EMCEEPEE_STDIO_OAUTH_TIMEOUT_MS"]
+  );
+  registerTools(
+    mcpServer,
+    sessionManager,
+    () => activeSession,
+    {
+      tokenStore,
+      dcrStore,
+      logger,
+      ...(Number.isFinite(stdioOauthTimeoutMs) && stdioOauthTimeoutMs > 0
+        ? { oauthTimeoutMs: stdioOauthTimeoutMs }
+        : {}),
+    },
+    { codemodeEnabled: !noCodemode }
+  );
 
   // Create stdio transport (with optional logging wrapper for debugging)
   const rawTransport = new StdioServerTransport();
@@ -1608,6 +1841,8 @@ async function main(): Promise<void> {
 
     // Shutdown session manager (cleans up all sessions)
     await sessionManager.shutdown();
+
+    stdioPendingFlows.shutdown();
 
     process.exit(0);
   };

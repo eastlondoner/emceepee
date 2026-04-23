@@ -7,6 +7,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
   Tool,
   Resource,
@@ -19,6 +20,8 @@ import type {
   CreateMessageResult,
   ElicitResult,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { EmceepeeOAuthClientProvider } from "./auth/backend/oauth-provider.js";
+import { BackendAuthRequiredError } from "./auth/backend/errors.js";
 import {
   ToolListChangedNotificationSchema,
   ResourceListChangedNotificationSchema,
@@ -50,8 +53,16 @@ export interface MCPHttpClientOptions {
   name: string;
   /** HTTP URL of the MCP server endpoint */
   url: string;
-  /** Custom headers to send with requests (e.g., Authorization) */
+  /** Custom headers to send with requests (e.g., Authorization). Ignored if authMode === "oauth". */
   headers?: Record<string, string>;
+  /** Upstream auth mode. Default: "none". */
+  authMode?: "none" | "oauth";
+  /**
+   * When authMode === "oauth", the provider the SDK transport uses to obtain
+   * and refresh access tokens. Must be supplied by the caller (the session
+   * manager constructs it with the right stores + sessionId).
+   */
+  authProvider?: EmceepeeOAuthClientProvider;
   /** Callback when the connection status changes */
   onStatusChange?: (status: BackendServerStatus, error?: string) => void;
   /** Callback when a notification is received from the server */
@@ -99,6 +110,8 @@ export class MCPHttpClient {
   private readonly name: string;
   private readonly url: string;
   private readonly headers: Record<string, string> | undefined;
+  private readonly authMode: "none" | "oauth";
+  private readonly authProvider: EmceepeeOAuthClientProvider | undefined;
   private readonly onStatusChange:
     | ((status: BackendServerStatus, error?: string) => void)
     | undefined;
@@ -142,7 +155,14 @@ export class MCPHttpClient {
   constructor(options: MCPHttpClientOptions) {
     this.name = options.name;
     this.url = options.url;
-    this.headers = options.headers;
+    this.authMode = options.authMode ?? "none";
+    this.authProvider = options.authProvider;
+    // headers are ignored entirely in OAuth mode — the transport uses the provider.
+    this.headers = this.authMode === "oauth" ? undefined : options.headers;
+    // Do NOT install onAuthorizationRequired here: it's a single-slot
+    // callback and would race with concurrent runAuthed() invocations.
+    // Instead, runAuthed() reads the authorize URL directly from the
+    // provider's pending-flow-backed getter on failure.
     this.onStatusChange = options.onStatusChange;
     this.onNotification = options.onNotification;
     this.onLog = options.onLog;
@@ -248,12 +268,16 @@ export class MCPHttpClient {
     this.setStatus("connecting");
 
     try {
-      // Create the transport with optional custom headers
-      const transportOptions: { requestInit?: { headers: Record<string, string> } } = {};
-      if (this.headers) {
-        transportOptions.requestInit = { headers: this.headers };
+      // If OAuth, make sure the issuer is resolved before the SDK's auth()
+      // runs (so clientInformation/saveClientInformation can key DCR).
+      if (this.authMode === "oauth" && this.authProvider) {
+        await this.authProvider.ensureIssuer();
       }
-      this.transport = new StreamableHTTPClientTransport(new URL(this.url), transportOptions);
+
+      this.transport = new StreamableHTTPClientTransport(
+        new URL(this.url),
+        this.buildTransportOptions()
+      );
 
       // Create the client with capabilities for receiving server requests
       this.client = new Client(
@@ -294,8 +318,14 @@ export class MCPHttpClient {
         this.handleUnexpectedDisconnect();
       };
 
-      // Connect and initialize
-      await this.client.connect(this.transport);
+      // Connect and initialize. Wrap in runAuthed so a 401 during
+      // initialize (on an OAuth-protected upstream with missing/expired
+      // tokens) surfaces as BackendAuthRequiredError carrying the
+      // authorize URL the SDK registered via redirectToAuthorization —
+      // the tool handler then turns that into an elicitation.
+      const client = this.client;
+      const transport = this.transport;
+      await this.runAuthed(() => client.connect(transport));
 
       // Get server capabilities
       const serverCapabilities = this.client.getServerCapabilities();
@@ -393,6 +423,45 @@ export class MCPHttpClient {
   }
 
   /**
+   * Build the transport options object (OAuth provider OR static headers, not both).
+   */
+  private buildTransportOptions(): {
+    authProvider?: EmceepeeOAuthClientProvider;
+    requestInit?: { headers: Record<string, string> };
+  } {
+    if (this.authMode === "oauth" && this.authProvider) {
+      return { authProvider: this.authProvider };
+    }
+    if (this.headers) {
+      return { requestInit: { headers: this.headers } };
+    }
+    return {};
+  }
+
+  /**
+   * Run `fn` and translate UnauthorizedError into BackendAuthRequiredError
+   * carrying the authorization URL the SDK just registered via our provider.
+   */
+  private async runAuthed<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof UnauthorizedError && this.authMode === "oauth") {
+        // Read the authorize URL from the provider's pending-flow-backed
+        // getter. This is safe under concurrent runAuthed() calls because
+        // PendingFlowRegistry is the single source of truth keyed by server
+        // name, and single-flight dedupe guarantees both callers see the
+        // same URL.
+        const url = this.authProvider?.getCurrentAuthorizationUrl();
+        if (url) {
+          throw new BackendAuthRequiredError(this.name, url);
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
    * List all tools available on the backend server
    */
   public async listTools(): Promise<Tool[]> {
@@ -401,7 +470,7 @@ export class MCPHttpClient {
       return [];
     }
 
-    const result = await client.listTools();
+    const result = await this.runAuthed(() => client.listTools());
     return result.tools;
   }
 
@@ -414,10 +483,12 @@ export class MCPHttpClient {
   ): Promise<CallToolResult> {
     const client = this.getConnectedClient();
 
-    const result = await client.callTool({
-      name,
-      arguments: args,
-    });
+    const result = await this.runAuthed(() =>
+      client.callTool({
+        name,
+        arguments: args,
+      })
+    );
 
     return result as CallToolResult;
   }
@@ -431,7 +502,7 @@ export class MCPHttpClient {
       return [];
     }
 
-    const result = await client.listResources();
+    const result = await this.runAuthed(() => client.listResources());
     return result.resources;
   }
 
@@ -444,7 +515,7 @@ export class MCPHttpClient {
       return [];
     }
 
-    const result = await client.listResourceTemplates();
+    const result = await this.runAuthed(() => client.listResourceTemplates());
     return result.resourceTemplates;
   }
 
@@ -454,7 +525,7 @@ export class MCPHttpClient {
   public async readResource(uri: string): Promise<ReadResourceResult> {
     const client = this.getConnectedClient();
 
-    const result = await client.readResource({ uri });
+    const result = await this.runAuthed(() => client.readResource({ uri }));
     return result;
   }
 
@@ -472,7 +543,7 @@ export class MCPHttpClient {
       );
     }
 
-    await client.subscribeResource({ uri });
+    await this.runAuthed(() => client.subscribeResource({ uri }));
   }
 
   /**
@@ -488,7 +559,7 @@ export class MCPHttpClient {
       );
     }
 
-    await client.unsubscribeResource({ uri });
+    await this.runAuthed(() => client.unsubscribeResource({ uri }));
   }
 
   /**
@@ -507,7 +578,7 @@ export class MCPHttpClient {
       return [];
     }
 
-    const result = await client.listPrompts();
+    const result = await this.runAuthed(() => client.listPrompts());
     return result.prompts;
   }
 
@@ -520,10 +591,12 @@ export class MCPHttpClient {
   ): Promise<GetPromptResult> {
     const client = this.getConnectedClient();
 
-    const result = await client.getPrompt({
-      name,
-      arguments: args,
-    });
+    const result = await this.runAuthed(() =>
+      client.getPrompt({
+        name,
+        arguments: args,
+      })
+    );
 
     return result;
   }
@@ -701,12 +774,14 @@ export class MCPHttpClient {
     }
 
     try {
-      // Create new transport with optional custom headers
-      const transportOptions: { requestInit?: { headers: Record<string, string> } } = {};
-      if (this.headers) {
-        transportOptions.requestInit = { headers: this.headers };
+      if (this.authMode === "oauth" && this.authProvider) {
+        await this.authProvider.ensureIssuer();
       }
-      this.transport = new StreamableHTTPClientTransport(new URL(this.url), transportOptions);
+
+      this.transport = new StreamableHTTPClientTransport(
+        new URL(this.url),
+        this.buildTransportOptions()
+      );
 
       // Create new client
       this.client = new Client(
@@ -743,8 +818,13 @@ export class MCPHttpClient {
         this.handleUnexpectedDisconnect();
       };
 
-      // Connect and initialize
-      await this.client.connect(this.transport);
+      // Connect and initialize. Wrap in runAuthed — same rationale as
+      // in connect() above: surface a 401 as BackendAuthRequiredError.
+      {
+        const client = this.client;
+        const transport = this.transport;
+        await this.runAuthed(() => client.connect(transport));
+      }
 
       // Get server capabilities
       const serverCapabilities = this.client.getServerCapabilities();
@@ -852,8 +932,11 @@ export class MCPHttpClient {
       }, HEALTH_CHECK_TIMEOUT_MS);
 
       try {
-        // Try to list tools as health check
-        await this.client.listTools();
+        // Try to list tools as health check. Use runAuthed so a stale upstream
+        // token surfaces as BackendAuthRequiredError instead of crashing the
+        // health loop — health checks must not kick off an elicitation.
+        const client = this.client;
+        await this.runAuthed(() => client.listTools());
 
         // Success - reset failure counter
         clearTimeout(timeoutId);
